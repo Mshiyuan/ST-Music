@@ -1,0 +1,12 @@
+{
+    "display_name": "ST-Music",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "Mshiyuan",
+    "version": "0.1.0",
+    "homePage": "https://github.com/Mshiyuan/ST-Music",
+    "auto_update": false
+}
