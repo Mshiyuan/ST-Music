@@ -68,7 +68,8 @@ function vkeysProvider() {
         async lyric(track) {
             if (track.platform !== 'netease') return '';
             const r = await request(`${base}/netease/lyric?id=${track.id}`);
-            return (r && r.data && r.data.lrc) || '';
+            const d = (r && r.data) || {};
+            return d.lrc ? { lrc: d.lrc, trans: d.trans || '' } : null;
         },
     };
 }
@@ -125,21 +126,24 @@ export async function searchSongs(keyword) {
     return list;
 }
 
+const timed = (text) => /\[\d+:\d+/.test(text || '');
+
+/** 取歌词，返回 { lrc, trans }。译文来自平台自带的翻译，没有时 trans 为空。 */
 export async function getLyric(track) {
     if (lyricCache.has(track.key)) return lyricCache.get(track.key);
-    let text = '';
-    if (track.lrcUrl) {
-        try { text = await request(track.lrcUrl, true); } catch (e) { /* 换下一种方式 */ }
-    }
-    if (!text || !/\[\d+:\d+/.test(text)) {
-        try { text = (await withProviders((p) => p.lyric, (p) => p.lyric(track))) || ''; } catch (e) { text = ''; }
-    }
-    lyricCache.set(track.key, text);
-    return text;
+    // 两种来源同时取：带独立译文的接口优先，另一种作为后备
+    const [a, b] = await Promise.allSettled([
+        withProviders((p) => p.lyric, (p) => p.lyric(track)),
+        track.lrcUrl ? request(track.lrcUrl, true) : Promise.resolve(''),
+    ]);
+    let out = { lrc: '', trans: '' };
+    if (a.status === 'fulfilled' && a.value && timed(a.value.lrc)) out = a.value;
+    else if (b.status === 'fulfilled' && timed(b.value)) out = { lrc: b.value, trans: '' };
+    lyricCache.set(track.key, out);
+    return out;
 }
 
-/** 解析带时间轴的歌词，返回按时间排序的 [{ t: 秒, text }]。 */
-export function parseLyric(text) {
+function parseLines(text) {
     const out = [];
     for (const line of String(text || '').split(/\r?\n/)) {
         const stamps = [...line.matchAll(/\[(\d+):(\d+)(?:[.:](\d+))?\]/g)];
@@ -148,8 +152,79 @@ export function parseLyric(text) {
         if (!body) continue;
         for (const m of stamps) {
             const frac = m[3] ? Number('0.' + m[3]) : 0;
-            out.push({ t: Number(m[1]) * 60 + Number(m[2]) + frac, text: body });
+            const t = Number(m[1]) * 60 + Number(m[2]) + frac;
+            out.push({ t, key: Math.round(t * 100), text: body });
         }
     }
-    return out.sort((a, b) => a.t - b.t);
+    return out;
+}
+
+const HAN = /[一-鿿]/;
+const KANA_HANGUL = /[぀-ヿ가-힯]/;
+
+/** 有些接口把译文写在行尾括号里：原文不是中文、括号里是中文时，拆成原文和译文。 */
+function splitInline(text) {
+    const m = /^(.*\S)\s*[（(]([^（()）]+)[)）]$/.exec(text);
+    if (!m) return null;
+    const [, head, tail] = m;
+    const tailIsChinese = HAN.test(tail) && !KANA_HANGUL.test(tail);
+    const headIsForeign = KANA_HANGUL.test(head) || !HAN.test(head);
+    return tailIsChinese && headIsForeign ? { text: head, trans: tail } : null;
+}
+
+/** 解析带时间轴的歌词，返回按时间排序的 [{ t: 秒, text, trans }]。 */
+export function parseLyric(lrc, trans) {
+    const lines = parseLines(lrc);
+    if (timed(trans)) {
+        const map = new Map(parseLines(trans).map((l) => [l.key, l.text]));
+        for (const l of lines) l.trans = map.get(l.key) || '';
+    } else {
+        for (const l of lines) {
+            const s = splitInline(l.text);
+            if (s) { l.text = s.text; l.trans = s.trans; } else l.trans = '';
+        }
+    }
+    return lines.sort((a, b) => a.t - b.t);
+}
+
+/** 探测一个地址能否播放（只取到元数据为止）。 */
+export function canLoad(url, timeout = 8000) {
+    return new Promise((resolve) => {
+        const el = new Audio();
+        el.preload = 'metadata';
+        let done = false;
+        const finish = (ok) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            el.removeAttribute('src');
+            el.load();
+            resolve(ok);
+        };
+        const timer = setTimeout(() => finish(false), timeout);
+        el.addEventListener('loadedmetadata', () => finish(true));
+        el.addEventListener('error', () => finish(false));
+        el.src = url;
+    });
+}
+
+/** 依次探测一首歌的各个地址；能播时把可用地址排到最前并返回 true。 */
+export async function probeTrack(track) {
+    for (const url of (track.urls || []).filter(Boolean)) {
+        if (await canLoad(url)) {
+            track.urls = [url, ...track.urls.filter((u) => u && u !== url)];
+            return true;
+        }
+    }
+    return false;
+}
+
+/** 提前与接口和音频服务器建立连接，缩短首次请求的等待。 */
+export function preconnect() {
+    for (const origin of ['https://api.i-meto.com', 'https://api.vkeys.cn', 'https://music.163.com']) {
+        const link = document.createElement('link');
+        link.rel = 'preconnect';
+        link.href = origin;
+        document.head.appendChild(link);
+    }
 }

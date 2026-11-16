@@ -23,6 +23,8 @@
     --stm-press-dur: 90ms;
     --stm-stagger: 45ms;
     --stm-from: translateY(28px) scale(0.94);
+    --stm-pop-from: scale(0.2);          /* 面板从悬浮按钮处弹出时的起点 */
+    --stm-sheet-from: translateY(104%);  /* 列表从底部弹出时的起点 */
 }
 
 /* 弹簧：stiffness 170 / damping 18 / mass 1，37 个采样点，只过冲一次 */
@@ -32,16 +34,38 @@
     }
 }
 
+/* 动效风格：平滑（有位移和缩放，不回弹） */
+:root[data-stm-motion="smooth"] {
+    --stm-spring: cubic-bezier(0.16, 1, 0.3, 1);
+    --stm-in-dur: 520ms;
+    --stm-release-dur: 420ms;
+}
+
+/* 动效风格：淡入淡出（只变透明度） */
+:root[data-stm-motion="fade"] {
+    --stm-spring: ease-out;
+    --stm-in-dur: 240ms;
+    --stm-release-dur: 240ms;
+    --stm-stagger: 20ms;
+    --stm-from: none;
+    --stm-pop-from: none;
+    --stm-sheet-from: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
-    :root {
+    :root,
+    :root[data-stm-motion] {
         --stm-in-dur: 1ms;
         --stm-release-dur: 1ms;
         --stm-out-dur: 1ms;
         --stm-press-dur: 1ms;
         --stm-stagger: 0ms;
         --stm-from: none;
+        --stm-pop-from: none;
+        --stm-sheet-from: none;
     }
-    .stm-disc { animation: none !important; }
+    .stm-disc,
+    .stm-fab-cover { animation: none !important; }
 }
 
 @keyframes stm-in {
@@ -150,13 +174,16 @@
     z-index: 4000;
     display: grid;
     place-items: center;
-    width: 48px;
-    height: 48px;
+    box-sizing: border-box;
+    width: var(--stm-fab, 40px);
+    height: var(--stm-fab, 40px);
+    overflow: hidden;
     border-radius: 50%;
     border: 1px solid var(--stm-border);
     background: var(--stm-bg);
     color: var(--stm-fg);
-    font-size: 18px;
+    font-size: calc(var(--stm-fab, 40px) * 0.4);
+    line-height: 1;
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
     backdrop-filter: blur(12px);
     cursor: pointer;
@@ -193,7 +220,7 @@
     user-select: none;
 
     opacity: 0;
-    transform: var(--stm-from);
+    transform: var(--stm-pop-from);
     visibility: hidden;
     pointer-events: none;
     transition:
@@ -234,36 +261,28 @@
 
 .stm-head {
     flex: none;
-    padding: 8px 10px 6px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    /* 左右留出四角手柄的位置，避免手柄压住按钮 */
+    padding: 6px 22px 0;
     touch-action: none;
 }
 
-.stm-head-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
 
 /* 顶部横杠：提示卡片可以拖动 */
 .stm-grab {
     width: 36px;
     height: 4px;
-    margin: 0 auto 8px;
     border-radius: 2px;
     background: var(--stm-raise);
 }
 
-.stm-panel[data-form="drawer"] .stm-grab {
-    display: none;
-}
 
 .stm-panel[data-form="card"] .stm-head {
     cursor: grab;
 }
 
-.stm-head .stm-seg {
-    flex: 1;
-}
 
 .stm-body {
     position: relative;
@@ -304,10 +323,11 @@
 .stm-rz {
     position: absolute;
     z-index: 2;
-    width: 34px;
-    height: 34px;
+    width: 28px;
+    height: 28px;
     touch-action: none;
-    opacity: 0.35;
+    opacity: 0;
+    transition: opacity var(--stm-out-dur) ease-out;
 }
 
 .stm-rz::after {
@@ -488,7 +508,6 @@
 .stm-line.stm-now {
     opacity: 1;
     transform: none;
-    font-weight: 600;
 }
 
 .stm-meta {
@@ -731,4 +750,327 @@
     border-radius: 10px;
     background: var(--stm-raise);
     font-size: 0.95em;
+}
+
+.stm-panel[data-form="drawer"] .stm-head > .stm-grab {
+    visibility: hidden;
+}
+
+.stm-rz.stm-active {
+    opacity: 0.55;
+}
+
+@media (hover: hover) {
+    .stm-rz:hover {
+        opacity: 0.55;
+    }
+}
+
+/* ---------- 悬浮按钮的内容 ---------- */
+
+.stm-fab-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    pointer-events: none;
+}
+
+.stm-fab-cover {
+    animation: stm-spin 24s linear infinite;
+    animation-play-state: paused;
+}
+
+.stm-fab.stm-playing .stm-fab-cover {
+    animation-play-state: running;
+}
+
+.stm-fab-text {
+    font-size: calc(var(--stm-fab, 40px) * 0.42);
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+/* ---------- 歌词：译文、滑动时的中线 ---------- */
+
+.stm-line-main,
+.stm-line-trans {
+    display: block;
+}
+
+.stm-line.stm-now .stm-line-main {
+    font-weight: 600;
+}
+
+.stm-line-trans {
+    margin-top: 2px;
+    font-size: 13px;
+    opacity: 0.85;
+}
+
+.stm-hide-trans .stm-line-trans {
+    display: none;
+}
+
+.stm-scrub,
+.stm-trans {
+    position: absolute;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition:
+        opacity var(--stm-out-dur) var(--stm-out),
+        transform var(--stm-release-dur) var(--stm-spring),
+        visibility 0s linear var(--stm-out-dur);
+}
+
+.stm-scrub {
+    left: 0;
+    right: 0;
+    top: 50%;
+    height: 32px;
+    margin-top: -16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+}
+
+.stm-scrub-line {
+    flex: 1;
+    height: 1px;
+    background: var(--stm-dim);
+}
+
+.stm-scrub-play {
+    font-size: 13px;
+}
+
+.stm-show-lyrics.stm-scrubbing .stm-scrub,
+.stm-show-lyrics .stm-trans {
+    opacity: 1;
+    visibility: inherit;
+    pointer-events: inherit;
+    transition:
+        opacity var(--stm-out-dur) ease-out,
+        transform var(--stm-release-dur) var(--stm-spring),
+        visibility 0s;
+}
+
+.stm-trans {
+    appearance: none;
+    left: 0;
+    bottom: 0;
+    margin: 0;
+    padding: 2px 10px;
+    border: 1px solid var(--stm-dim);
+    border-radius: 12px;
+    background: none;
+    color: var(--stm-dim);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.stm-trans.stm-on {
+    border-color: var(--stm-fg);
+    color: var(--stm-fg);
+}
+
+.stm-show-lyrics .stm-trans:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+/* ---------- 播放列表：从面板底部弹出 ---------- */
+
+.stm-scrim {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity var(--stm-out-dur) var(--stm-out), visibility 0s linear var(--stm-out-dur);
+}
+
+.stm-sheet {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 72%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    padding: 0 12px 12px;
+    border-radius: var(--stm-radius) var(--stm-radius) 0 0;
+    background: var(--stm-soft);
+    box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.25);
+    opacity: 0;
+    transform: var(--stm-sheet-from);
+    visibility: hidden;
+    pointer-events: none;
+    transition:
+        transform var(--stm-out-dur) var(--stm-out),
+        opacity var(--stm-out-dur) var(--stm-out),
+        visibility 0s linear var(--stm-out-dur);
+}
+
+.stm-sheet.stm-instant {
+    transition: none;
+}
+
+.stm-open.stm-sheet-open .stm-scrim {
+    opacity: 1;
+    visibility: inherit;
+    pointer-events: inherit;
+    transition: opacity var(--stm-in-dur) ease-out, visibility 0s;
+}
+
+.stm-open.stm-sheet-open .stm-sheet {
+    opacity: 1;
+    transform: none;
+    visibility: inherit;
+    pointer-events: inherit;
+    transition:
+        transform var(--stm-in-dur) var(--stm-spring),
+        opacity var(--stm-out-dur) ease-out,
+        visibility 0s;
+}
+
+.stm-sheet-head {
+    flex: none;
+    padding-top: 8px;
+    touch-action: none;
+    cursor: grab;
+}
+
+.stm-sheet-head .stm-grab {
+    margin: 0 auto 2px;
+}
+
+.stm-sheet-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-left: 10px;
+}
+
+.stm-sheet-title {
+    font-weight: 700;
+}
+
+/* 按剧情推荐的歌：标题前有一个小圆点 */
+.stm-row.stm-rec .stm-row-title::before {
+    content: "";
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-right: 6px;
+    border-radius: 50%;
+    background: var(--stm-accent);
+    vertical-align: middle;
+}
+
+/* ---------- 设置页的控件 ---------- */
+
+.stm-stepper {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px;
+    border-radius: 12px;
+    background: var(--stm-soft);
+}
+
+.stm-step {
+    appearance: none;
+    width: 30px;
+    height: 30px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 9px;
+    background: var(--stm-raise);
+    color: inherit;
+    font: inherit;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.stm-step:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+.stm-step-num {
+    min-width: 26px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+}
+
+.stm-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.stm-chip {
+    appearance: none;
+    margin: 0;
+    padding: 5px 12px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--stm-soft);
+    color: var(--stm-dim);
+    font: inherit;
+    font-size: 0.92em;
+    cursor: pointer;
+}
+
+.stm-chip.stm-on {
+    background: var(--stm-raise);
+    color: var(--stm-fg);
+    font-weight: 600;
+    box-shadow: inset 0 0 0 1px var(--stm-dim);
+}
+
+.stm-chip-icon {
+    width: 40px;
+    padding: 8px 0;
+}
+
+.stm-range-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.stm-range-row .stm-range {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+}
+
+.stm-range-num {
+    flex: none;
+    min-width: 48px;
+    text-align: right;
+    color: var(--stm-dim);
+    font-variant-numeric: tabular-nums;
+}
+
+.stm-settings .stm-textarea {
+    height: auto;
+    padding: 8px 12px;
+    resize: vertical;
+    line-height: 1.4;
+}
+
+/* 列表弹出时把后面的内容淡化（不在列表上再叠一层背景模糊，那样渲染开销很大） */
+.stm-open.stm-sheet-open .stm-view.stm-show {
+    opacity: 0.1;
 }

@@ -3,20 +3,27 @@
 import { settings, save, notify } from './settings.js';
 import { searchSongs } from './sources.js';
 import * as player from './player.js';
+import * as rec from './rec.js';
 
 const MIN_W = 280;
 const MIN_H = 400;
 const DRAG_THRESHOLD = 6;
 const STAGGER_MAX = 12;
+const MANUAL_HOLD = 3000;      // 手动滑动歌词后，这段时间内不自动滚动
+const SHEET_CLOSE_DRAG = 70;   // 列表下拉超过这个距离就收起
 
 let fab, panel, els = {};
-let view = 'now';
+let view = 'now';              // 'now' | 'search'
 let seeking = false;
-let lyricIndex = -1;
 let searchToken = 0;
+
+let lyricIndex = -1;           // 正在唱的那一句
 let lyricOffset = 0;
-let manualUntil = 0;          // 手动滑动歌词后，在这个时间点之前不自动滚动
-const MANUAL_HOLD = 3000;
+let manualUntil = 0;
+let manualTimer = 0;
+let scrubIndex = -1;           // 滑动时停在中线上的那一句
+let centers = null;            // 各句歌词的中心位置（缓存，避免拖动时反复读布局）
+let stageH = 0;
 
 function h(tag, cls, text) {
     const el = document.createElement(tag);
@@ -34,6 +41,11 @@ function iconButton(icon, title, cls = '') {
     return b;
 }
 
+function setIcon(btn, icon, title) {
+    btn.firstChild.className = 'fa-solid ' + icon;
+    if (title) { btn.title = title; btn.setAttribute('aria-label', title); }
+}
+
 const fmt = (sec) => {
     const s = Math.max(0, Math.floor(sec || 0));
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
@@ -45,8 +57,7 @@ const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
 export function makeSeg(options, value, onChange) {
     const seg = h('div', 'stm-seg');
     seg.style.setProperty('--n', options.length);
-    const thumb = h('div', 'stm-seg-thumb');
-    seg.appendChild(thumb);
+    seg.appendChild(h('div', 'stm-seg-thumb'));
     const set = (v, fire) => {
         const i = Math.max(0, options.findIndex((o) => o.value === v));
         seg.style.setProperty('--i', i);
@@ -65,13 +76,13 @@ export function makeSeg(options, value, onChange) {
 }
 
 /** 拖动：超过阈值才算拖动，否则算点击。 */
-function draggable(handle, { onStart, onMove, onEnd, onTap, ignore }) {
+function draggable(handle, { onStart, onMove, onEnd, onPress, onRelease }) {
     handle.addEventListener('pointerdown', (e) => {
         if (e.button !== undefined && e.button !== 0) return;
-        if (ignore && e.target.closest(ignore)) return;
         const sx = e.clientX, sy = e.clientY;
         let moved = false;
         const base = onStart ? onStart(e) : null;
+        if (onPress) onPress();
         const move = (ev) => {
             const dx = ev.clientX - sx, dy = ev.clientY - sy;
             if (!moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
@@ -83,13 +94,14 @@ function draggable(handle, { onStart, onMove, onEnd, onTap, ignore }) {
             window.removeEventListener('pointermove', move);
             window.removeEventListener('pointerup', up);
             window.removeEventListener('pointercancel', up);
+            if (onRelease) onRelease();
             if (moved) {
                 // 拖动结束后不触发按钮的点击
                 const stop = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
                 handle.addEventListener('click', stop, true);
                 setTimeout(() => handle.removeEventListener('click', stop, true), 0);
                 if (onEnd) onEnd();
-            } else if (onTap) onTap(e);
+            }
         };
         window.addEventListener('pointermove', move, { passive: false });
         window.addEventListener('pointerup', up);
@@ -99,11 +111,33 @@ function draggable(handle, { onStart, onMove, onEnd, onTap, ignore }) {
 
 // ---------- 悬浮按钮 ----------
 
-function placeFab() {
+export function placeFab() {
     const s = settings().fab;
-    const size = fab.offsetWidth || 48;
+    const size = settings().fabSize;
     fab.style.left = clamp(s.x * window.innerWidth - size / 2, 4, window.innerWidth - size - 4) + 'px';
     fab.style.top = clamp(s.y * window.innerHeight - size / 2, 4, window.innerHeight - size - 4) + 'px';
+}
+
+/** 按设置渲染悬浮按钮的大小和内容。 */
+export function renderFab() {
+    const s = settings();
+    const icon = s.fabIcon;
+    const t = player.current();
+    fab.style.setProperty('--stm-fab', s.fabSize + 'px');
+    const fallback = () => fab.replaceChildren(h('i', `fa-solid ${icon.icon || 'fa-music'}`));
+    const image = (src, cls) => {
+        const img = h('img', `stm-fab-img ${cls}`);
+        img.alt = '';
+        img.draggable = false;
+        img.addEventListener('error', fallback);
+        img.src = src;
+        fab.replaceChildren(img);
+    };
+    if (icon.type === 'cover' && t && t.cover) image(t.cover, 'stm-fab-cover');
+    else if (icon.type === 'image' && icon.image.trim()) image(icon.image.trim(), '');
+    else if (icon.type === 'text' && icon.text.trim()) fab.replaceChildren(h('span', 'stm-fab-text', icon.text.trim()));
+    else fallback();
+    placeFab();
 }
 
 function buildFab() {
@@ -111,7 +145,6 @@ function buildFab() {
     fab.id = 'stm-fab';
     fab.setAttribute('role', 'button');
     fab.title = '音乐';
-    fab.appendChild(h('i', 'fa-solid fa-music'));
     draggable(fab, {
         onStart: () => ({ x: fab.offsetLeft, y: fab.offsetTop }),
         onMove: (dx, dy, b) => {
@@ -127,7 +160,7 @@ function buildFab() {
     // 用点击事件开关面板：若在按下抬起时就打开，同一次点击会落到刚出现的面板上
     fab.addEventListener('click', () => togglePanel());
     document.body.appendChild(fab);
-    placeFab();
+    renderFab();
 }
 
 // ---------- 面板位置与大小 ----------
@@ -146,10 +179,27 @@ function applyCard() {
     return { x, y, w, h: ht };
 }
 
+/** 面板从悬浮按钮的位置弹出、收回：把缩放的原点放在按钮中心。 */
+function setOrigin() {
+    const f = fab.getBoundingClientRect();
+    const box = settings().panelForm === 'card' ? applyCard() : { x: 0, y: window.innerHeight - panel.offsetHeight };
+    panel.style.transformOrigin = `${Math.round(f.left + f.width / 2 - box.x)}px ${Math.round(f.top + f.height / 2 - box.y)}px`;
+}
+
+function invalidateLayout() {
+    centers = null;
+    stageH = 0;
+}
+
 export function applyForm() {
     panel.dataset.form = settings().panelForm;
     applyCard();
+    invalidateLayout();
     scrollLyric(true);
+}
+
+export function applyMotion() {
+    document.documentElement.dataset.stmMotion = settings().motion;
 }
 
 function bindResize(corner) {
@@ -158,6 +208,8 @@ function bindResize(corner) {
     grip.addEventListener('click', () => {});
     draggable(grip, {
         onStart: () => applyCard(),
+        onPress: () => grip.classList.add('stm-active'),
+        onRelease: () => grip.classList.remove('stm-active'),
         onMove: (dx, dy, b) => {
             const c = settings().card;
             const vw = window.innerWidth, vh = window.innerHeight;
@@ -168,6 +220,7 @@ function bindResize(corner) {
             if (corner.includes('n')) { ht = clamp(b.h - dy, MIN_H, b.y + b.h - 4); y = b.y + b.h - ht; }
             Object.assign(c, { x, y, w, h: ht });
             applyCard();
+            invalidateLayout();
             scrollLyric(true);
         },
         onEnd: save,
@@ -182,16 +235,11 @@ function buildPanel() {
     panel.id = 'stm-panel';
 
     const head = h('div', 'stm-head');
-    els.tabs = makeSeg([
-        { value: 'now', label: '播放' },
-        { value: 'search', label: '搜索' },
-        { value: 'queue', label: '列表' },
-    ], view, showView);
+    els.searchBtn = iconButton('fa-magnifying-glass', '搜索');
+    els.searchBtn.addEventListener('click', () => showView(view === 'search' ? 'now' : 'search'));
     const close = iconButton('fa-xmark', '关闭', 'stm-close');
     close.addEventListener('click', () => togglePanel(false));
-    const row = h('div', 'stm-head-row');
-    row.append(els.tabs, close);
-    head.append(h('div', 'stm-grab'), row);
+    head.append(els.searchBtn, h('div', 'stm-grab'), close);
     draggable(head, {
         onStart: () => (settings().panelForm === 'card' ? applyCard() : null),
         onMove: (dx, dy, b) => {
@@ -204,7 +252,7 @@ function buildPanel() {
     });
 
     const body = h('div', 'stm-body');
-    body.append(buildNow(), buildSearch(), buildQueue());
+    body.append(buildNow(), buildSearch(), ...buildSheet());
     panel.append(head, body);
     for (const c of ['nw', 'ne', 'sw', 'se']) bindResize(c);
     document.body.appendChild(panel);
@@ -214,17 +262,18 @@ function buildPanel() {
 
 export function togglePanel(force) {
     const open = force === undefined ? !panel.classList.contains('stm-open') : force;
-    if (open) applyCard();
+    if (open === panel.classList.contains('stm-open')) return;
+    setOrigin();
     panel.classList.toggle('stm-open', open);
     fab.classList.toggle('stm-active', open);
-    if (open) { if (view === 'queue') renderQueue(); scrollLyric(true); }
+    if (open) { invalidateLayout(); scrollLyric(true); } else toggleSheet(false);
 }
 
 function showView(v) {
     view = v;
-    els.tabs.setValue(v);
     for (const el of panel.querySelectorAll('.stm-view')) el.classList.toggle('stm-show', el.dataset.view === v);
-    if (v === 'queue') renderQueue();
+    setIcon(els.searchBtn, v === 'search' ? 'fa-chevron-left' : 'fa-magnifying-glass', v === 'search' ? '返回' : '搜索');
+    toggleSheet(false);
     if (v === 'search') setTimeout(() => { if (window.matchMedia('(pointer: fine)').matches) els.input.focus(); }, 60);
     if (v === 'now') scrollLyric(true);
 }
@@ -247,37 +296,61 @@ function buildNow() {
     els.cover.addEventListener('load', () => { els.cover.style.visibility = ''; });
     disc.appendChild(els.cover);
     discWrap.append(disc, arm);
+
     els.lyrics = h('div', 'stm-lyrics');
     els.lyricsInner = h('div', 'stm-lyrics-inner');
     els.lyrics.appendChild(els.lyricsInner);
-    stage.append(discWrap, els.lyrics);
+
+    // 滑动歌词时出现的中线：左边是这一句的时间，右边是播放键，点击跳到这一句
+    els.scrub = h('div', 'stm-scrub');
+    els.scrubTime = h('span', 'stm-scrub-time', '0:00');
+    els.scrub.append(els.scrubTime, h('span', 'stm-scrub-line'), h('i', 'fa-solid fa-play stm-scrub-play'));
+    els.scrub.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const line = player.state.lyric[scrubIndex];
+        if (line) player.seekTo(line.t);
+        endManual(false);
+    });
+
+    els.trans = h('button', 'stm-trans stm-press', '译');
+    els.trans.type = 'button';
+    els.trans.title = '显示或隐藏译文';
+    els.trans.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const s = settings();
+        s.showTrans = !s.showTrans;
+        save();
+        applyTrans();
+    });
+
+    stage.append(discWrap, els.lyrics, els.scrub, els.trans);
     stage.addEventListener('click', () => {
         stage.classList.toggle('stm-show-lyrics');
-        manualUntil = 0;
-        scrollLyric(true);
+        endManual(true);
     });
-    // 手动滑动歌词：松手后暂停自动滚动几秒，之后回到当前句
     draggable(els.lyrics, {
         onStart: () => lyricOffset,
         onMove: (dx, dy, base) => {
-            const kids = els.lyricsInner.children;
-            if (!kids.length) return;
-            const half = els.lyrics.clientHeight / 2;
-            const first = kids[0], last = kids[kids.length - 1];
-            const max = half - (first.offsetTop + first.offsetHeight / 2);
-            const min = half - (last.offsetTop + last.offsetHeight / 2);
-            lyricOffset = clamp(base + dy, min, max);
+            const c = lineCenters();
+            if (!c.length) return;
+            const half = stageH / 2;
+            lyricOffset = clamp(base + dy, half - c[c.length - 1], half - c[0]);
             manualUntil = Date.now() + MANUAL_HOLD;
             els.lyricsInner.classList.add('stm-instant');
             els.lyricsInner.style.transform = `translateY(${Math.round(lyricOffset)}px)`;
+            updateScrub();
         },
-        onEnd: () => { manualUntil = Date.now() + MANUAL_HOLD; },
+        onEnd: () => {
+            manualUntil = Date.now() + MANUAL_HOLD;
+            clearTimeout(manualTimer);
+            manualTimer = setTimeout(() => endManual(false), MANUAL_HOLD);
+        },
     });
     els.stage = stage;
 
     const meta = h('div', 'stm-meta');
     els.title = h('div', 'stm-title', '未选择歌曲');
-    els.artist = h('div', 'stm-artist', '在「搜索」里添加歌曲');
+    els.artist = h('div', 'stm-artist', '点左上角的放大镜搜索歌曲');
     meta.append(els.title, els.artist);
 
     const prog = h('div', 'stm-progress');
@@ -303,9 +376,9 @@ function buildNow() {
     els.play.addEventListener('click', () => player.toggle());
     const next = iconButton('fa-forward-step', '下一首');
     next.addEventListener('click', () => player.next());
-    const list = iconButton('fa-list', '播放列表');
-    list.addEventListener('click', () => showView('queue'));
-    ctrl.append(els.mode, prev, els.play, next, list);
+    els.listBtn = iconButton('fa-list', '播放列表');
+    els.listBtn.addEventListener('click', () => toggleSheet());
+    ctrl.append(els.mode, prev, els.play, next, els.listBtn);
 
     sec.append(stage, meta, prog, ctrl);
     return sec;
@@ -342,12 +415,13 @@ function bindSeek() {
 function renderTrack() {
     const t = player.current();
     els.title.textContent = t ? t.title : '未选择歌曲';
-    els.artist.textContent = t ? t.artist : '在「搜索」里添加歌曲';
+    els.artist.textContent = t ? t.artist : '点左上角的放大镜搜索歌曲';
     if (t && t.cover) { els.cover.src = t.cover; } else { els.cover.removeAttribute('src'); els.cover.style.visibility = 'hidden'; }
     setProgress(0);
     els.cur.textContent = '0:00';
     els.dur.textContent = '0:00';
-    if (view === 'queue') renderQueue();
+    if (settings().fabIcon.type === 'cover') renderFab();
+    if (sheetOpen()) renderQueue();
 }
 
 const MODE = {
@@ -358,16 +432,11 @@ const MODE = {
 
 function renderState() {
     const playing = player.state.playing;
-    const icon = els.play.firstChild;
-    icon.className = 'fa-solid ' + (player.state.loading ? 'fa-spinner fa-spin' : playing ? 'fa-pause' : 'fa-play');
-    els.play.title = playing ? '暂停' : '播放';
-    els.play.setAttribute('aria-label', els.play.title);
+    setIcon(els.play, player.state.loading ? 'fa-spinner fa-spin' : playing ? 'fa-pause' : 'fa-play', playing ? '暂停' : '播放');
     panel.classList.toggle('stm-playing', playing);
     fab.classList.toggle('stm-playing', playing);
     const [mIcon, mTitle] = MODE[settings().mode] || MODE.loop;
-    els.mode.firstChild.className = 'fa-solid ' + mIcon;
-    els.mode.title = mTitle;
-    els.mode.setAttribute('aria-label', mTitle);
+    setIcon(els.mode, mIcon, mTitle);
 }
 
 function renderTime() {
@@ -382,6 +451,15 @@ function renderTime() {
 
 // ---------- 歌词 ----------
 
+function applyTrans() {
+    const show = settings().showTrans;
+    els.trans.classList.toggle('stm-on', show && player.state.hasTrans);
+    els.trans.disabled = !player.state.hasTrans;
+    els.lyrics.classList.toggle('stm-hide-trans', !show);
+    invalidateLayout();
+    scrollLyric(true);
+}
+
 function renderLyric() {
     lyricIndex = -1;
     els.lyricsInner.replaceChildren();
@@ -390,13 +468,15 @@ function renderLyric() {
         els.lyricsInner.appendChild(h('p', 'stm-line stm-line-empty', player.current() ? '暂无歌词' : ''));
     } else {
         for (const l of lines) {
-            const p = h('p', 'stm-line', l.text);
-            p.dataset.t = l.t;
+            const p = h('p', 'stm-line');
+            p.appendChild(h('span', 'stm-line-main', l.text));
+            if (l.trans) p.appendChild(h('span', 'stm-line-trans', l.trans));
             els.lyricsInner.appendChild(p);
         }
     }
+    endManual(false);
+    applyTrans();
     updateLyric(player.time());
-    scrollLyric(true);
 }
 
 function updateLyric(t) {
@@ -410,17 +490,49 @@ function updateLyric(t) {
     lyricIndex = i;
     if (kids[i]) kids[i].classList.add('stm-now');
     scrollLyric(false);
+    updateScrub();
+}
+
+function lineCenters() {
+    if (!centers) {
+        centers = [...els.lyricsInner.children].map((k) => k.offsetTop + k.offsetHeight / 2);
+        stageH = els.lyrics.clientHeight;
+    }
+    return centers;
 }
 
 function scrollLyric(instant) {
     if (!panel || !panel.classList.contains('stm-open')) return;
     if (!instant && Date.now() < manualUntil) return;
-    const line = els.lyricsInner.children[Math.max(lyricIndex, 0)];
-    if (!line) return;
-    const offset = els.lyrics.clientHeight / 2 - (line.offsetTop + line.offsetHeight / 2);
-    lyricOffset = offset;
+    const c = lineCenters();
+    if (!c.length) return;
+    lyricOffset = stageH / 2 - c[Math.max(lyricIndex, 0)];
     els.lyricsInner.classList.toggle('stm-instant', !!instant);
-    els.lyricsInner.style.transform = `translateY(${Math.round(offset)}px)`;
+    els.lyricsInner.style.transform = `translateY(${Math.round(lyricOffset)}px)`;
+}
+
+/** 滑动时显示中线；停在正在唱的那一句上时不显示。 */
+function updateScrub() {
+    const lines = player.state.lyric;
+    let show = false;
+    if (lines.length && Date.now() < manualUntil) {
+        const c = lineCenters();
+        const target = stageH / 2 - lyricOffset;
+        let best = 0;
+        for (let i = 1; i < c.length; i++) if (Math.abs(c[i] - target) < Math.abs(c[best] - target)) best = i;
+        scrubIndex = best;
+        show = best !== lyricIndex;
+        if (show) els.scrubTime.textContent = fmt(lines[best].t);
+    }
+    els.stage.classList.toggle('stm-scrubbing', show);
+}
+
+/** 结束手动滑动状态，回到正在唱的那一句。 */
+function endManual(instant) {
+    clearTimeout(manualTimer);
+    manualUntil = 0;
+    if (els.stage) els.stage.classList.remove('stm-scrubbing');
+    scrollLyric(instant);
 }
 
 // ---------- 搜索 ----------
@@ -484,19 +596,51 @@ async function runSearch() {
     });
 }
 
-// ---------- 播放列表 ----------
+// ---------- 播放列表（从底部弹出） ----------
 
-function buildQueue() {
-    const sec = h('section', 'stm-view');
-    sec.dataset.view = 'queue';
+const sheetOpen = () => panel && panel.classList.contains('stm-sheet-open');
+
+function buildSheet() {
+    els.scrim = h('div', 'stm-scrim');
+    els.scrim.addEventListener('click', () => toggleSheet(false));
+
+    els.sheet = h('div', 'stm-sheet');
+    const head = h('div', 'stm-sheet-head');
+    els.sheetTitle = h('div', 'stm-sheet-title', '播放列表');
+    els.refresh = iconButton('fa-wand-magic-sparkles', '按剧情重新推荐');
+    els.refresh.addEventListener('click', () => rec.refresh());
+    const top = h('div', 'stm-sheet-top');
+    top.append(els.sheetTitle, els.refresh);
+    head.append(h('div', 'stm-grab'), top);
+    let pulled = 0;
+    draggable(head, {
+        onMove: (dx, dy) => {
+            pulled = Math.max(0, dy);
+            els.sheet.classList.add('stm-instant');
+            els.sheet.style.transform = `translateY(${pulled}px)`;
+        },
+        onEnd: () => {
+            els.sheet.classList.remove('stm-instant');
+            els.sheet.style.transform = '';
+            if (pulled > SHEET_CLOSE_DRAG) toggleSheet(false);
+            pulled = 0;
+        },
+    });
     els.queue = h('div', 'stm-list');
-    sec.appendChild(els.queue);
-    return sec;
+    els.sheet.append(head, els.queue);
+    return [els.scrim, els.sheet];
+}
+
+function toggleSheet(force) {
+    const open = force === undefined ? !sheetOpen() : force;
+    if (open === sheetOpen()) return;
+    if (open) renderQueue();
+    panel.classList.toggle('stm-sheet-open', open);
 }
 
 function renderQueue() {
-    if (!els.queue) return;
     const q = player.queue();
+    els.sheetTitle.textContent = q.length ? `播放列表（${q.length}）` : '播放列表';
     if (!q.length) { setHint(els.queue, '列表为空'); return; }
     els.queue.replaceChildren();
     q.forEach((track, i) => {
@@ -504,6 +648,7 @@ function renderQueue() {
         del.addEventListener('click', () => player.removeAt(i));
         const { row, main } = songRow(track, i, [del]);
         row.classList.toggle('stm-current', i === player.index());
+        row.classList.toggle('stm-rec', !!track.rec);
         main.addEventListener('click', () => player.playIndex(i));
         els.queue.appendChild(row);
     });
@@ -523,17 +668,20 @@ export function resetLayout() {
     save();
     placeFab();
     applyCard();
+    invalidateLayout();
 }
 
 export function init() {
+    applyMotion();
     buildFab();
     buildPanel();
     player.on('track', renderTrack);
     player.on('state', renderState);
     player.on('time', renderTime);
     player.on('lyric', renderLyric);
-    player.on('queue', () => { if (view === 'queue') renderQueue(); });
-    window.addEventListener('resize', () => { placeFab(); applyCard(); scrollLyric(true); });
+    player.on('queue', () => { if (sheetOpen()) renderQueue(); });
+    rec.onBusy((busy) => setIcon(els.refresh, busy ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'));
+    window.addEventListener('resize', () => { placeFab(); applyCard(); invalidateLayout(); scrollLyric(true); });
     renderTrack();
     renderState();
     setEnabled(settings().enabled);
