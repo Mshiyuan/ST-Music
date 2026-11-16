@@ -247,17 +247,6 @@
     height: var(--stm-h);
 }
 
-.stm-panel[data-form="drawer"] {
-    /* 酒馆页面里固定定位的参照不一定是屏幕，所以不用 bottom，改按屏幕高度算 top */
-    --stm-dh: min(78vh, 640px);
-    left: 0;
-    width: 100vw;
-    height: var(--stm-dh);
-    top: calc(100vh - var(--stm-dh));
-    top: calc(100dvh - var(--stm-dh));
-    border-width: 1px 0 0;
-    border-radius: var(--stm-radius) var(--stm-radius) 0 0;
-}
 
 .stm-head {
     flex: none;
@@ -347,9 +336,6 @@
 .stm-rz-sw::after { left: 10px; bottom: 10px; border-width: 0 0 2px 2px; border-bottom-left-radius: 8px; }
 .stm-rz-se::after { right: 10px; bottom: 10px; border-width: 0 2px 2px 0; border-bottom-right-radius: 8px; }
 
-.stm-panel[data-form="drawer"] .stm-rz {
-    display: none;
-}
 
 /* ---------- 播放页 ---------- */
 
@@ -399,84 +385,13 @@
         visibility 0s;
 }
 
-.stm-disc {
-    position: relative;
-    width: 200px;
-    height: 200px;
-    width: min(78cqw, 78cqh);
-    height: min(78cqw, 78cqh);
-    border-radius: 50%;
-    background:
-        radial-gradient(circle, transparent 0 31%, rgba(255, 255, 255, 0.06) 31.5% 32%, transparent 32.5%),
-        repeating-radial-gradient(circle, #171717 0 2px, #232323 2px 4px);
-    box-shadow: 0 0 0 6px var(--stm-softer), 0 10px 30px rgba(0, 0, 0, 0.3);
-    animation: stm-spin 24s linear infinite;
-    animation-play-state: paused;
-}
 
-.stm-playing .stm-disc {
-    animation-play-state: running;
-}
 
-.stm-cover {
-    position: absolute;
-    inset: 19%;
-    width: 62%;
-    height: 62%;
-    border-radius: 50%;
-    object-fit: cover;
-    background: linear-gradient(135deg, var(--stm-raise), var(--stm-soft));
-}
 
-.stm-arm {
-    position: absolute;
-    top: 2px;
-    left: 78%;
-    width: 0;
-    height: 0;
-    transform-origin: 0 0;
-    transform: rotate(-14deg);
-    transition: transform var(--stm-in-dur) var(--stm-spring);
-}
 
-.stm-playing .stm-arm {
-    transform: rotate(22deg);
-}
 
-.stm-arm::before {
-    content: "";
-    position: absolute;
-    left: -8px;
-    top: -2px;
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    background: var(--stm-fg);
-    opacity: 0.85;
-}
 
-.stm-arm-bar {
-    position: absolute;
-    left: -2px;
-    top: 4px;
-    width: 4px;
-    height: 70px;
-    height: min(30cqw, 30cqh);
-    border-radius: 2px;
-    background: var(--stm-fg);
-    opacity: 0.85;
-}
 
-.stm-arm-head {
-    position: absolute;
-    left: -6px;
-    top: 70px;
-    top: min(30cqw, 30cqh);
-    width: 12px;
-    height: 22px;
-    border-radius: 3px;
-    background: var(--stm-fg);
-}
 
 .stm-lyrics {
     overflow: hidden;
@@ -512,7 +427,10 @@
 
 .stm-meta {
     flex: none;
-    padding: 12px 2px 8px;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 12px 0 8px 2px;
 }
 
 .stm-title,
@@ -752,9 +670,6 @@
     font-size: 0.95em;
 }
 
-.stm-panel[data-form="drawer"] .stm-head > .stm-grab {
-    visibility: hidden;
-}
 
 .stm-rz.stm-active {
     opacity: 0.55;
@@ -878,10 +793,6 @@
     color: var(--stm-fg);
 }
 
-.stm-show-lyrics .stm-trans:disabled {
-    opacity: 0.35;
-    cursor: default;
-}
 
 /* ---------- 播放列表：从面板底部弹出 ---------- */
 
@@ -987,6 +898,8 @@
 
 .stm-step {
     appearance: none;
+    display: grid;
+    place-items: center;
     width: 30px;
     height: 30px;
     margin: 0;
@@ -995,8 +908,7 @@
     border-radius: 9px;
     background: var(--stm-raise);
     color: inherit;
-    font: inherit;
-    font-size: 18px;
+    font-size: 12px;
     line-height: 1;
     cursor: pointer;
 }
@@ -1073,4 +985,464 @@
 /* 列表弹出时把后面的内容淡化（不在列表上再叠一层背景模糊，那样渲染开销很大） */
 .stm-open.stm-sheet-open .stm-view.stm-show {
     opacity: 0.1;
+}
+
+/* ========== 0.3.0 ========== */
+
+/* ---------- 全屏形式 ---------- */
+
+.stm-panel[data-form="full"] {
+    left: 0;
+    top: 0;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
+}
+
+.stm-panel[data-form="full"] .stm-head {
+    padding-top: calc(10px + env(safe-area-inset-top, 0px));
+}
+
+/* 全屏时内容不随屏幕无限变宽 */
+.stm-panel[data-form="full"] .stm-view {
+    inset: 0 max(0px, calc((100% - 560px) / 2));
+}
+
+.stm-panel[data-form="full"] .stm-rz,
+.stm-panel[data-form="full"] .stm-more {
+    display: none;
+}
+
+.stm-head-right {
+    display: flex;
+}
+
+/* 全屏时底部的一行入口图标；卡片形式下收进「更多」 */
+.stm-dock {
+    display: none;
+}
+
+.stm-panel[data-form="full"] .stm-dock {
+    flex: none;
+    display: flex;
+    justify-content: space-between;
+    padding: 12px 4px calc(4px + env(safe-area-inset-bottom, 0px));
+}
+
+/* ---------- 唱片 ---------- */
+
+.stm-deck {
+    position: relative;
+    width: 200px;
+    height: 200px;
+    width: min(80cqw, 80cqh);
+    height: min(80cqw, 80cqh);
+}
+
+.stm-disc {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: repeating-radial-gradient(circle, #0e0e10 0 1px, #1c1c1f 1px 2.5px);
+    box-shadow: 0 0 0 1px #000, 0 0 0 5px var(--stm-softer), 0 14px 32px rgba(0, 0, 0, 0.35);
+    animation: stm-spin 24s linear infinite;
+    animation-play-state: paused;
+}
+
+.stm-playing .stm-disc {
+    animation-play-state: running;
+}
+
+/* 封面只占中间一半，外圈留给纹路 */
+.stm-cover {
+    position: absolute;
+    inset: 25%;
+    width: 50%;
+    height: 50%;
+    border-radius: 50%;
+    object-fit: cover;
+    background: linear-gradient(135deg, #3a3a3e, #1f1f22);
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.16), 0 0 0 8px #09090a;
+}
+
+.stm-disc-hole {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 4%;
+    height: 4%;
+    margin: -2% 0 0 -2%;
+    border-radius: 50%;
+    background: #09090a;
+    box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.35);
+}
+
+/* 反光：固定不动，只落在纹路上 */
+.stm-disc-sheen {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    pointer-events: none;
+    background: conic-gradient(from 25deg, transparent 0 6%, rgba(255, 255, 255, 0.16) 12%, transparent 20% 50%, rgba(255, 255, 255, 0.1) 60%, transparent 70%);
+    -webkit-mask-image: radial-gradient(circle, transparent 0 29%, #000 30%);
+    mask-image: radial-gradient(circle, transparent 0 29%, #000 30%);
+}
+
+/* 唱臂：以右上角的底座为轴转动。停放时在唱片之外，播放时针头落在外圈纹路上 */
+.stm-arm {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    transform-origin: 92% 4%;
+    transform: rotate(-16deg);
+    transition: transform var(--stm-in-dur) var(--stm-spring);
+    filter: drop-shadow(0 3px 4px rgba(0, 0, 0, 0.35));
+}
+
+.stm-playing .stm-arm {
+    transform: rotate(20deg);
+}
+
+.stm-arm-base {
+    position: absolute;
+    left: 92%;
+    top: 4%;
+    width: 13%;
+    height: 13%;
+    margin: -6.5% 0 0 -6.5%;
+    border-radius: 50%;
+    background: radial-gradient(circle, #f2f2f2 0 22%, #8d8d92 24% 46%, #d9d9dc 48% 100%);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+
+.stm-arm-bar {
+    position: absolute;
+    left: 92%;
+    top: 4%;
+    width: 2.4%;
+    min-width: 3px;
+    height: 28.6%;
+    margin-left: -1.2%;
+    border-radius: 3px;
+    background: linear-gradient(90deg, #b9b9be, #f1f1f3 45%, #a3a3a8);
+}
+
+.stm-arm-head {
+    position: absolute;
+    left: 92%;
+    top: 32.6%;
+    width: 5.5%;
+    height: 7%;
+    margin: -2.1% 0 0 -2.75%;
+    border-radius: 2px 2px 3px 3px;
+    background: linear-gradient(90deg, #d6d6d9, #f6f6f7 45%, #b4b4b9);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.2);
+}
+
+/* ---------- 歌名一行：歌词长条开关、收藏 ---------- */
+
+.stm-meta-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.stm-btn.stm-small {
+    width: 36px;
+    height: 36px;
+    font-size: 16px;
+}
+
+.stm-btn.stm-on {
+    color: var(--stm-accent);
+}
+
+.stm-btn:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+/* 单曲循环：循环箭头中间加一个 1 */
+.stm-mode {
+    position: relative;
+}
+
+.stm-mode.stm-one::after {
+    content: "1";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 8px;
+    font-weight: 800;
+    line-height: 1;
+}
+
+.stm-trans.stm-none {
+    display: none;
+}
+
+/* ---------- 页面：我的、详情、设置 ---------- */
+
+.stm-view.stm-page {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.stm-page .stm-list {
+    flex: none;
+    overflow: visible;
+}
+
+.stm-my-head {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 6px 2px 16px;
+    animation: stm-in var(--stm-in-dur) var(--stm-spring) both;
+}
+
+.stm-avatar {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 64px;
+    height: 64px;
+    overflow: hidden;
+    border-radius: 50%;
+    background: var(--stm-soft);
+    box-shadow: 0 0 0 2px var(--stm-raise);
+    font-size: 24px;
+}
+
+.stm-avatar img,
+.stm-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.stm-my-info {
+    min-width: 0;
+}
+
+.stm-my-name {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 19px;
+    font-weight: 700;
+}
+
+.stm-my-stat {
+    color: var(--stm-dim);
+    font-size: 13px;
+}
+
+.stm-tiles {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+}
+
+.stm-tile {
+    padding: 14px 10px 12px;
+    border-radius: 16px;
+    background: var(--stm-softer);
+    cursor: pointer;
+    animation: stm-in var(--stm-in-dur) var(--stm-spring) both;
+    animation-delay: calc((var(--i) + 1) * var(--stm-stagger));
+}
+
+.stm-tile-icon {
+    display: block;
+    margin-bottom: 10px;
+    color: var(--stm-accent);
+    font-size: 18px;
+}
+
+.stm-tile-title {
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.stm-tile-sub {
+    color: var(--stm-dim);
+    font-size: 12px;
+}
+
+.stm-sec-bar {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 16px 0 4px 2px;
+}
+
+.stm-sec-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-weight: 700;
+}
+
+.stm-list-row {
+    gap: 12px;
+    padding: 6px;
+    border-radius: 12px;
+    cursor: pointer;
+}
+
+.stm-list-row .stm-row-main {
+    padding: 0;
+}
+
+.stm-thumb {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    overflow: hidden;
+    border-radius: 10px;
+    background: var(--stm-soft);
+    color: var(--stm-dim);
+}
+
+.stm-row-go {
+    padding: 0 6px;
+    color: var(--stm-dim);
+    font-size: 12px;
+}
+
+.stm-panel .stm-settings {
+    padding-top: 0;
+    font-size: 14px;
+    user-select: text;
+}
+
+/* ---------- 弹出层里的内容 ---------- */
+
+.stm-sheet-action {
+    display: flex;
+    min-height: 40px;
+}
+
+.stm-menu-row {
+    gap: 14px;
+    padding: 12px;
+    border-radius: 12px;
+    cursor: pointer;
+}
+
+.stm-menu-row i {
+    width: 20px;
+    text-align: center;
+    color: var(--stm-dim);
+}
+
+.stm-tag-row {
+    align-items: flex-start;
+    gap: 12px;
+    padding: 8px 12px;
+}
+
+.stm-tag-key {
+    flex: none;
+    width: 3em;
+    color: var(--stm-dim);
+}
+
+.stm-tag-value {
+    flex: 1;
+    min-width: 0;
+}
+
+.stm-import {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 4px 4px 8px;
+}
+
+.stm-panel .stm-import .stm-textarea,
+.stm-panel .stm-settings .stm-textarea {
+    height: auto;
+    padding: 8px 12px;
+    resize: vertical;
+    line-height: 1.4;
+}
+
+.stm-import .stm-text-btn,
+.stm-set-block > .stm-text-btn {
+    align-self: flex-end;
+}
+
+/* ---------- 歌词长条 ---------- */
+
+.stm-strip {
+    position: fixed;
+    z-index: 3999;
+    box-sizing: border-box;
+    min-width: 120px;
+    max-width: min(78vw, 360px);
+    padding: 7px 16px;
+    border: 1px solid var(--stm-border);
+    border-radius: 18px;
+    background: var(--stm-bg);
+    color: var(--stm-fg);
+    font-size: 14px;
+    line-height: 1.4;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+    backdrop-filter: blur(12px);
+    cursor: grab;
+    user-select: none;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+
+    opacity: 0;
+    transform: var(--stm-from);
+    visibility: hidden;
+    pointer-events: none;
+    transition:
+        transform var(--stm-out-dur) var(--stm-out),
+        opacity var(--stm-out-dur) var(--stm-out),
+        visibility 0s linear var(--stm-out-dur);
+}
+
+.stm-strip.stm-show {
+    opacity: 1;
+    transform: none;
+    visibility: visible;
+    pointer-events: auto;
+    transition:
+        transform var(--stm-in-dur) var(--stm-spring),
+        opacity var(--stm-in-dur) var(--stm-spring),
+        visibility 0s;
+}
+
+.stm-strip-text {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    text-align: center;
+}
+
+/* ---------- 设置页的补充 ---------- */
+
+.stm-chip-del {
+    margin-left: 6px;
+    font-size: 0.8em;
+    opacity: 0.6;
+}
+
+.stm-chip.stm-chip-add {
+    background: none;
+    box-shadow: inset 0 0 0 1px var(--stm-dim);
+}
+
+.stm-settings .stm-code {
+    font-size: 13px;
 }

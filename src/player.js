@@ -2,6 +2,7 @@
 
 import { settings, save, notify } from './settings.js';
 import { getLyric, parseLyric } from './sources.js';
+import * as library from './library.js';
 
 const LOAD_TIMEOUT = 12000;
 const MAX_SKIPS = 5;
@@ -15,6 +16,11 @@ let loadToken = 0;
 let skips = 0;
 let pendingNext = null;        // 当前这首播完后要切到的歌（按剧情推荐的第一首）
 let userPaused = false;        // 用户主动暂停后，自动推荐不擅自开始播放
+let started = false;           // 本次会话里是否已经开始过播放
+let lastTime = 0;              // 上一次进度回报时的播放位置，用来累计收听时长
+let counted = false;           // 当前这首是否已经记过一次播放
+
+const COUNT_AFTER = 30;        // 播放满多少秒（或超过一半）记一次播放
 
 export const state = {
     playing: false,
@@ -39,6 +45,8 @@ export const index = () => settings().index;
 export const current = () => queue()[index()] || null;
 export const time = () => audio.currentTime || 0;
 export const duration = () => (Number.isFinite(audio.duration) ? audio.duration : 0);
+/** 用户是否处于「想听」的状态：开始过播放且没有主动暂停。后台保活据此决定是否工作。 */
+export const isActive = () => started && !userPaused && !!current();
 
 function setLoading(v) {
     state.loading = v;
@@ -81,7 +89,8 @@ async function startTrack(track, token) {
     if (!urls.length) return false;
     const main = attempt(audio, urls[0], true);
     let spare = null, spareResult = null;
-    if (urls[1]) {
+    // 页面在后台时不新建播放元素：后台新建的元素可能被浏览器拦截
+    if (urls[1] && !document.hidden) {
         spare = new Audio();
         spare.preload = 'auto';
         spareResult = attempt(spare, urls[1], false);
@@ -134,6 +143,9 @@ export async function playIndex(i, autoplay = true) {
     if (!autoplay) { emit('state'); return; }
 
     userPaused = false;
+    started = true;
+    lastTime = 0;
+    counted = false;
     let ok = false;
     if (!badKeys.has(track.key)) {
         setLoading(true);
@@ -163,6 +175,15 @@ export function toggle() {
     if (!t) return;
     if (!audio.src || audio.error) { playIndex(index()); return; }
     if (audio.paused) { userPaused = false; audio.play().catch(() => {}); } else { userPaused = true; audio.pause(); }
+    emit('state');
+}
+
+export function play() {
+    if (audio.paused) toggle();
+}
+
+export function pause() {
+    if (!audio.paused) toggle();
 }
 
 function stepIndex(dir) {
@@ -199,6 +220,17 @@ export function playTrack(track) {
     if (i < 0) { q.splice(index() + 1, 0, track); i = index() + 1; }
     emit('queue');
     playIndex(i);
+}
+
+/** 用一组歌替换整个播放列表，并从指定位置开始播放。 */
+export function playAll(tracks, start = 0) {
+    if (!tracks.length) return;
+    const s = settings();
+    s.queue = tracks.map((t) => ({ ...t }));
+    s.index = -1;
+    pendingNext = null;
+    emit('queue');
+    playIndex(start);
 }
 
 export function enqueue(track) {
@@ -275,7 +307,18 @@ export function cycleMode() {
 
 audio.addEventListener('play', () => { state.playing = true; emit('state'); });
 audio.addEventListener('pause', () => { state.playing = false; emit('state'); });
-audio.addEventListener('timeupdate', () => emit('time'));
+audio.addEventListener('timeupdate', () => {
+    const t = audio.currentTime;
+    const delta = t - lastTime;
+    lastTime = t;
+    if (delta > 0 && delta < 1.5) library.addListening(delta);   // 跳转造成的大跨度不计入
+    const track = current();
+    if (!counted && track && (t >= COUNT_AFTER || (duration() && t >= duration() / 2))) {
+        counted = true;
+        library.countPlay(track);
+    }
+    emit('time');
+});
 audio.addEventListener('durationchange', () => emit('time'));
 audio.addEventListener('ended', () => {
     if (settings().mode === 'single' && !pendingNext) { audio.currentTime = 0; audio.play().catch(() => {}); return; }

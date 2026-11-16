@@ -34,20 +34,25 @@ const outerLink = (id) => `https://music.163.com/song/media/outer/url?id=${id}.m
 
 function metingProvider(name, base) {
     const sep = base.includes('?') ? '&' : '?';
+    const toTracks = (list) => {
+        if (!Array.isArray(list)) throw new Error('bad response');
+        return list.map((s) => {
+            const id = (/[?&]id=(\d+)/.exec(s.url || '') || [])[1];
+            if (!id) return null;
+            return {
+                key: 'netease:' + id, platform: 'netease', id,
+                title: s.title || s.name || '', artist: s.author || s.artist || '',
+                cover: https(s.pic), urls: [https(s.url), outerLink(id)], lrcUrl: https(s.lrc),
+            };
+        }).filter(Boolean);
+    };
     return {
         name,
         async search(keyword) {
-            const list = await request(`${base}${sep}server=netease&type=search&id=${encodeURIComponent(keyword)}`);
-            if (!Array.isArray(list)) throw new Error('bad response');
-            return list.map((s) => {
-                const id = (/[?&]id=(\d+)/.exec(s.url || '') || [])[1];
-                if (!id) return null;
-                return {
-                    key: 'netease:' + id, platform: 'netease', id,
-                    title: s.title || s.name || '', artist: s.author || s.artist || '',
-                    cover: https(s.pic), urls: [https(s.url), outerLink(id)], lrcUrl: https(s.lrc),
-                };
-            }).filter(Boolean);
+            return toTracks(await request(`${base}${sep}server=netease&type=search&id=${encodeURIComponent(keyword)}`));
+        },
+        async playlist(id) {
+            return toTracks(await request(`${base}${sep}server=netease&type=playlist&id=${encodeURIComponent(id)}`));
         },
     };
 }
@@ -124,6 +129,11 @@ export async function searchSongs(keyword) {
     const list = (await withProviders((p) => p.search, (p) => p.search(k))) || [];
     searchCache.set(k, { at: Date.now(), list });
     return list;
+}
+
+/** 读取网易云歌单里的歌曲。只发送歌单编号。 */
+export async function getPlaylist(id) {
+    return (await withProviders((p) => p.playlist, (p) => p.playlist(id))) || [];
 }
 
 const timed = (text) => /\[\d+:\d+/.test(text || '');

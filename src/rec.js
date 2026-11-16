@@ -35,20 +35,29 @@ export const getLastTags = () => lastTags;
 export const onBusy = (fn) => { busyListener = fn; };
 const setBusy = (v) => { if (busyListener) busyListener(v); };
 
-function buildPrompt() {
+/** 默认的说明模板。{{…}} 是变量，生成时替换为实际内容。 */
+export const DEFAULT_PROMPT = [
+    '[音乐标签] 在本次回复的正文全部结束后，另起一行，输出且只输出一次下面这种格式的 HTML 注释，用于为当前剧情匹配背景音乐。不要在正文里提到它，也不要解释。',
+    '{{格式}}',
+    '填写要求：',
+    '{{维度说明}}',
+    '- 搜索：填 2–3 个可以直接在音乐平台搜索歌曲的短语，由氛围、情绪、曲风、乐器等词组成（例如「雨夜 钢琴」「伤感 民谣」），不要填具体歌名。',
+    '{{语言说明}}',
+    '{{偏好说明}}',
+].join('\n');
+
+/** 按当前设置生成发给模型的说明。 */
+export function buildPrompt() {
     const r = settings().rec;
     const dims = DIMS.filter(([k]) => r.dims[k]).map(([, name]) => name);
-    const fields = [...dims.map((d) => `${d}=…`), '搜索=短语1;短语2;短语3'].join('|');
-    const lines = [
-        '[音乐标签] 在本次回复的正文全部结束后，另起一行，输出且只输出一次下面这种格式的 HTML 注释，用于为当前剧情匹配背景音乐。不要在正文里提到它，也不要解释。',
-        `<!--stmusic ${fields}-->`,
-        '填写要求：',
-    ];
-    if (dims.length) lines.push(`- ${dims.join('、')}：各填 1–2 个简短的词，概括到本次回复为止的剧情氛围。`);
-    lines.push('- 搜索：填 2–3 个可以直接在音乐平台搜索歌曲的短语，由氛围、情绪、曲风、乐器等词组成（例如「雨夜 钢琴」「伤感 民谣」），不要填具体歌名。');
-    if (r.langs.length) lines.push(`- 歌曲语言偏好：${r.langs.join('、')}。搜索短语要体现这一偏好。`);
-    if (r.prefer.trim()) lines.push(`- 用户的音乐偏好：${r.prefer.trim()}`);
-    return lines.join('\n');
+    const vars = {
+        '格式': `<!--stmusic ${[...dims.map((d) => `${d}=…`), '搜索=短语1;短语2;短语3'].join('|')}-->`,
+        '维度说明': dims.length ? `- ${dims.join('、')}：各填 1–2 个简短的词，概括到本次回复为止的剧情氛围。` : '',
+        '语言说明': r.langs.length ? `- 歌曲语言偏好：${r.langs.join('、')}。搜索短语要体现这一偏好。` : '',
+        '偏好说明': r.prefer.trim() ? `- 用户的音乐偏好：${r.prefer.trim()}` : '',
+    };
+    const tpl = r.prompt.trim() ? r.prompt : DEFAULT_PROMPT;
+    return tpl.replace(/\{\{(格式|维度说明|语言说明|偏好说明)\}\}/g, (m, k) => vars[k]).split('\n').filter((line) => line.trim()).join('\n');
 }
 
 function parseTag(body) {
