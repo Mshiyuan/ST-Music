@@ -832,6 +832,17 @@
     transition: none;
 }
 
+/* 弹出时弹簧会略微越过终点，向下延伸一段同色背景，避免底部露出缝隙 */
+.stm-sheet::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    height: 80px;
+    background: inherit;
+}
+
 .stm-open.stm-sheet-open .stm-scrim {
     opacity: 1;
     visibility: inherit;
@@ -1010,25 +1021,8 @@
     inset: 0 max(0px, calc((100% - 560px) / 2));
 }
 
-.stm-panel[data-form="full"] .stm-rz,
-.stm-panel[data-form="full"] .stm-more {
+.stm-panel[data-form="full"] .stm-rz {
     display: none;
-}
-
-.stm-head-right {
-    display: flex;
-}
-
-/* 全屏时底部的一行入口图标；卡片形式下收进「更多」 */
-.stm-dock {
-    display: none;
-}
-
-.stm-panel[data-form="full"] .stm-dock {
-    flex: none;
-    display: flex;
-    justify-content: space-between;
-    padding: 12px 4px calc(4px + env(safe-area-inset-bottom, 0px));
 }
 
 /* ---------- 唱片 ---------- */
@@ -1163,20 +1157,19 @@
     cursor: default;
 }
 
-/* 单曲循环：循环箭头中间加一个 1 */
-.stm-mode {
-    position: relative;
+/* 单曲循环：用一个完整的图形代替循环图标，1 与箭头线条粗细一致 */
+.stm-one-svg {
+    display: none;
+    width: 20px;
+    height: 20px;
 }
 
-.stm-mode.stm-one::after {
-    content: "1";
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    transform: translate(-50%, -50%);
-    font-size: 8px;
-    font-weight: 800;
-    line-height: 1;
+.stm-mode.stm-one i {
+    display: none;
+}
+
+.stm-mode.stm-one .stm-one-svg {
+    display: block;
 }
 
 .stm-trans.stm-none {
@@ -1445,4 +1438,293 @@
 
 .stm-settings .stm-code {
     font-size: 13px;
+}
+
+/* ========== 0.4.0 ========== */
+
+/* ---------- 顶部：横杠始终在正中，不受两侧按钮数量影响 ---------- */
+.stm-head {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+}
+
+.stm-head-side {
+    display: flex;
+    align-items: center;
+}
+
+.stm-head-right {
+    justify-content: flex-end;
+}
+
+.stm-head-search {
+    display: none;
+}
+
+.stm-panel[data-view="now"][data-now="sheet"] .stm-head-search {
+    display: grid;
+}
+
+/* ---------- 页面与底部的位置 ---------- */
+.stm-panel {
+    --stm-tab-h: 52px;
+    --stm-cap-h: 0px;
+}
+
+.stm-panel.stm-cap-on.stm-has-track {
+    --stm-cap-h: 56px;
+}
+
+.stm-panel[data-form="full"] {
+    --stm-tab-h: calc(52px + env(safe-area-inset-bottom, 0px));
+}
+
+.stm-panel .stm-body > .stm-view {
+    bottom: calc(var(--stm-tab-h) + var(--stm-cap-h));
+}
+
+.stm-panel .stm-body > .stm-view[data-view="now"] {
+    bottom: var(--stm-tab-h);
+}
+
+.stm-panel[data-now="sheet"] .stm-body > .stm-view[data-view="now"] {
+    bottom: 0;
+}
+
+.stm-panel[data-form="full"][data-now="sheet"] .stm-body > .stm-view[data-view="now"] {
+    padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+}
+
+/* 横向滑动的手势交给插件处理，纵向仍可滚动。
+   可滚动的元素会重新开始计算 touch-action，所以各页和列表上也要写 */
+.stm-body,
+.stm-body > .stm-view,
+.stm-body .stm-list {
+    touch-action: pan-y;
+}
+
+.stm-view.stm-noanim {
+    transition: none !important;
+}
+
+.stm-foot {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    /* 底部区域本身不接收点击，隐藏的胶囊和底栏不会挡住下面的按钮。
+       面板关闭时子元素继承 visibility: hidden，不会被点到 */
+    pointer-events: none;
+    transition: opacity var(--stm-out-dur) ease-out;
+}
+
+.stm-cap,
+.stm-tabs {
+    pointer-events: auto;
+}
+
+.stm-panel[data-form="full"] .stm-foot {
+    left: max(0px, calc((100% - 560px) / 2));
+    right: max(0px, calc((100% - 560px) / 2));
+}
+
+.stm-open.stm-sheet-open .stm-foot {
+    opacity: 0.1;
+}
+
+/* ---------- 当前歌曲胶囊 ---------- */
+.stm-cap {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    height: 48px;
+    margin: 0 12px 8px;
+    padding: 0 4px 0 6px;
+    border-radius: 24px;
+    background: var(--stm-soft);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition:
+        transform var(--stm-in-dur) var(--stm-spring),
+        opacity var(--stm-in-dur) var(--stm-spring),
+        visibility 0s;
+}
+
+.stm-panel.stm-cap-on.stm-has-track .stm-cap {
+    display: flex;
+}
+
+.stm-cap:active {
+    transform: scale(0.97);
+    transition: transform var(--stm-press-dur) ease-out;
+}
+
+.stm-panel[data-view="now"] .stm-cap {
+    opacity: 0;
+    transform: translateY(16px) scale(0.96);
+    visibility: hidden;
+    pointer-events: none;
+    transition:
+        transform var(--stm-out-dur) var(--stm-out),
+        opacity var(--stm-out-dur) var(--stm-out),
+        visibility 0s linear var(--stm-out-dur);
+}
+
+.stm-cap-cover {
+    flex: none;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    object-fit: cover;
+    background: var(--stm-raise);
+    animation: stm-spin 24s linear infinite;
+    animation-play-state: paused;
+}
+
+.stm-playing .stm-cap-cover {
+    animation-play-state: running;
+}
+
+.stm-cap-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 14px;
+}
+
+.stm-cap-title {
+    font-weight: 700;
+}
+
+.stm-cap-artist {
+    color: var(--stm-dim);
+}
+
+/* ---------- 底栏 ---------- */
+.stm-tabs {
+    display: flex;
+    align-items: center;
+    justify-content: space-around;
+    height: 52px;
+    padding: 0 22px;
+    border-top: 1px solid var(--stm-softer);
+    transition:
+        transform var(--stm-in-dur) var(--stm-spring),
+        opacity var(--stm-in-dur) var(--stm-spring),
+        visibility 0s;
+}
+
+.stm-panel[data-form="full"] .stm-tabs {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.stm-panel[data-view="now"][data-now="sheet"] .stm-tabs {
+    opacity: 0;
+    transform: translateY(100%);
+    visibility: hidden;
+    pointer-events: none;
+    transition:
+        transform var(--stm-out-dur) var(--stm-out),
+        opacity var(--stm-out-dur) var(--stm-out),
+        visibility 0s linear var(--stm-out-dur);
+}
+
+.stm-btn.stm-tab {
+    color: var(--stm-dim);
+    font-size: 18px;
+}
+
+.stm-btn.stm-tab.stm-on {
+    color: var(--stm-accent);
+}
+
+/* ---------- 选歌页 ---------- */
+.stm-pick-note {
+    padding: 12px 4px;
+}
+
+/* ---------- 设置：可折叠的板块 ---------- */
+.stm-sec-head {
+    appearance: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    margin: 6px 0 0;
+    padding: 12px 6px;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    font-weight: 700;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.stm-sec-arrow {
+    color: var(--stm-dim);
+    transition: transform var(--stm-release-dur) var(--stm-spring);
+}
+
+.stm-sec-open:not(.stm-sec-closing) .stm-sec-arrow {
+    transform: rotate(180deg);
+}
+
+.stm-sec-body {
+    display: none;
+}
+
+.stm-sec-open .stm-sec-body {
+    display: block;
+    transform-origin: 50% 0;
+    animation: stm-in var(--stm-in-dur) var(--stm-spring) both;
+}
+
+.stm-sec-closing .stm-sec-body {
+    animation: stm-fold var(--stm-out-dur) var(--stm-out) both;
+}
+
+@keyframes stm-fold {
+    to { opacity: 0; transform: translateY(-8px) scale(0.98); }
+}
+
+/* ---------- 输入框：文字与示例文字的字号 ---------- */
+.stm-panel .stm-textarea,
+.stm-settings .stm-textarea,
+.stm-panel .stm-settings .stm-textarea {
+    font-size: 14px;
+}
+
+.stm-panel .stm-input::placeholder,
+.stm-settings .stm-input::placeholder {
+    font-size: 13px;
+    opacity: 0.7;
+}
+
+/* ---------- 歌词长条：行数与透明度 ---------- */
+.stm-strip.stm-show {
+    opacity: var(--stm-strip-op, 1);
+}
+
+.stm-strip-next {
+    display: none;
+}
+
+.stm-strip.stm-strip-two .stm-strip-next {
+    display: block;
+    margin-top: 2px;
+    font-size: 12px;
+    color: var(--stm-dim);
+}
+
+.stm-strip.stm-strip-two .stm-strip-text:first-child {
+    text-align: left;
+}
+
+.stm-strip.stm-strip-two .stm-strip-next {
+    text-align: right;
 }

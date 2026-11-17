@@ -4,8 +4,17 @@ import { settings, save } from './settings.js';
 import { h, clamp, draggable } from './dom.js';
 import * as player from './player.js';
 
-let el, textEl;
+let el, textEl, nextEl;
 let panelOpen = false;
+
+/** 按设置应用行数与透明度。 */
+export function applyStyle() {
+    if (!el) return;
+    const s = settings().strip;
+    el.classList.toggle('stm-strip-two', s.lines === 2);
+    el.style.setProperty('--stm-strip-op', String(s.opacity));
+    if (el.classList.contains('stm-show')) place();
+}
 
 function place() {
     const s = settings().strip;
@@ -14,11 +23,12 @@ function place() {
     el.style.top = clamp(s.y * window.innerHeight - ht / 2, 4, window.innerHeight - ht - 4) + 'px';
 }
 
-/** 设置显示的文字；没有歌词时显示歌名和歌手。 */
-export function setLine(text) {
+/** 设置显示的文字；没有歌词时显示歌名和歌手。两行模式下第二行是下一句。 */
+export function setLine(text, next = '') {
     if (!textEl) return;
     const t = player.current();
     textEl.textContent = text || (t ? `${t.title} - ${t.artist}` : '');
+    nextEl.textContent = text ? next : '';
 }
 
 /** 按开关、面板状态和是否有歌曲决定显示或隐藏。 */
@@ -35,7 +45,9 @@ export function init(onTap) {
     el = h('div', 'stm-strip');
     el.id = 'stm-strip';
     textEl = h('div', 'stm-strip-text');
-    el.appendChild(textEl);
+    nextEl = h('div', 'stm-strip-text stm-strip-next');
+    el.append(textEl, nextEl);
+    applyStyle();
     draggable(el, {
         onStart: () => ({ x: el.offsetLeft, y: el.offsetTop }),
         onMove: (dx, dy, b) => {

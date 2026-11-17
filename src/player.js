@@ -22,6 +22,17 @@ let counted = false;           // 当前这首是否已经记过一次播放
 
 const COUNT_AFTER = 30;        // 播放满多少秒（或超过一半）记一次播放
 
+// 播放记录：用于排查页面在后台时的中断。只保存在内存里。
+const TRACE_MAX = 80;
+const traces = [];
+export function trace(text) {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    traces.push(`${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} ${document.hidden ? '后台' : '前台'} ${text}`);
+    if (traces.length > TRACE_MAX) traces.shift();
+}
+export const getTrace = () => traces.join('\n');
+
 export const state = {
     playing: false,
     loading: false,
@@ -65,15 +76,18 @@ function attempt(el, url, play) {
             el.removeEventListener('error', onBad);
             resolve(ok);
         };
-        const onOk = () => finish(true);
-        const onBad = () => finish(false);
-        const timer = setTimeout(() => finish(false), LOAD_TIMEOUT);
+        const onOk = () => { if (play) trace('可以播放'); finish(true); };
+        const onBad = () => { if (play) trace('加载出错'); finish(false); };
+        const timer = setTimeout(() => { if (play) trace('加载超时'); finish(false); }, LOAD_TIMEOUT);
         el.addEventListener('canplay', onOk);
         el.addEventListener('error', onBad);
         el.src = url;
         el.load();
         // 立即发起播放而不是等缓冲完成：少一次等待，也更容易通过浏览器的自动播放限制
-        if (play) el.play().catch(() => {});
+        if (play) {
+            trace('设置地址并请求播放');
+            el.play().then(() => trace('播放请求成功'), (e) => trace(`播放请求被拒绝：${(e && e.name) || '未知'}`));
+        }
     });
 }
 
@@ -136,6 +150,7 @@ export async function playIndex(i, autoplay = true) {
     const track = q[s.index];
     if (pendingNext === track.key) pendingNext = null;
     const token = ++loadToken;
+    trace(`切换到：${track.title}`);
     audio.pause();
     state.playing = false;
     emit('track');
@@ -246,22 +261,27 @@ export function enqueue(track) {
 
 /**
  * 放入一批按剧情推荐的歌。
- * 上一批推荐的歌被替换，手动加入的歌保留；新歌排在当前这首之后。
- * immediate 为 true（手动刷新）时立即播放第一首；否则等当前这首播完再切。
+ * 新歌排在当前这首之后；以前推荐的歌保留，超过上限时去掉最早的；手动加入的歌不受影响。
+ * immediate 为 true（手动刷新）或设置为「立即切换」时马上播放第一首；否则等当前这首播完再切。
  */
 export function setRecommended(tracks, immediate) {
     const s = settings();
     const cur = current();
-    const kept = s.queue.filter((t) => !t.rec || t === cur);
-    const fresh = tracks.filter((t) => !kept.some((k) => k.key === t.key)).map((t) => ({ ...t, rec: true }));
+    const now = Date.now();
+    const fresh = tracks.filter((t) => !s.queue.some((k) => k.key === t.key)).map((t) => ({ ...t, rec: true, recAt: now }));
     if (!fresh.length) return 0;
+    // 以前推荐的歌留在列表里；总数超过上限时去掉最早推荐的（正在播放的那首不动）
+    const old = s.queue.filter((t) => t.rec && t !== cur).sort((a, b) => (a.recAt || 0) - (b.recAt || 0));
+    const over = old.length + fresh.length - Math.max(fresh.length, s.rec.keep);
+    const drop = new Set(over > 0 ? old.slice(0, over) : []);
+    const kept = s.queue.filter((t) => !drop.has(t));
     const at = cur ? kept.indexOf(cur) + 1 : 0;
     s.queue = [...kept.slice(0, at), ...fresh, ...kept.slice(at)];
     s.index = cur ? at - 1 : -1;
     save();
     emit('queue');
     const idle = !state.playing && !state.loading;
-    if (immediate || !cur || (idle && !userPaused)) {
+    if (immediate || s.rec.arrive === 'now' || !cur || (idle && !userPaused)) {
         playIndex(at);
     } else {
         pendingNext = fresh[0].key;
@@ -320,7 +340,12 @@ audio.addEventListener('timeupdate', () => {
     emit('time');
 });
 audio.addEventListener('durationchange', () => emit('time'));
+audio.addEventListener('stalled', () => trace('数据中断'));
+audio.addEventListener('waiting', () => trace('等待缓冲'));
+audio.addEventListener('playing', () => trace('开始出声'));
+document.addEventListener('visibilitychange', () => trace(document.hidden ? '页面转入后台' : '页面回到前台'));
 audio.addEventListener('ended', () => {
+    trace('一曲结束');
     if (settings().mode === 'single' && !pendingNext) { audio.currentTime = 0; audio.play().catch(() => {}); return; }
     next();
 });

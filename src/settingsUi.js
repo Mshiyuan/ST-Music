@@ -1,11 +1,12 @@
 // 设置页的内容。同一份内容既放在酒馆的扩展设置页里，也放在播放面板的「设置」页里。
 
-import { settings, save, ctx, NAME } from './settings.js';
+import { settings, save, ctx, notify, NAME } from './settings.js';
 import { h, makeSeg } from './dom.js';
 import * as rec from './rec.js';
 import * as ui from './ui.js';
 import * as strip from './strip.js';
 import { syncKeepAlive } from './media.js';
+import * as player from './player.js';
 
 /** 一行：左边标题和说明，右边控件。 */
 function item(title, desc, control) {
@@ -37,7 +38,35 @@ function toggle(value, onChange) {
     return b;
 }
 
-function stepper(value, min, max, onChange) {
+/** 滑块：右侧显示当前值。 */
+function range(value, min, max, step, show, onChange) {
+    const row = h('div', 'stm-range-row');
+    const input = h('input', 'stm-range');
+    input.type = 'range';
+    input.min = String(min); input.max = String(max); input.step = String(step);
+    input.value = String(value);
+    const label = h('span', 'stm-range-num', show(value));
+    input.addEventListener('input', () => { const v = Number(input.value); label.textContent = show(v); onChange(v); });
+    row.append(input, label);
+    return row;
+}
+
+/** 长按：按住超过一定时间触发，之后的那次点击不再生效。 */
+function onLongPress(el, fn) {
+    let timer = 0, sx = 0, sy = 0, fired = false;
+    const cancel = () => clearTimeout(timer);
+    el.addEventListener('pointerdown', (e) => {
+        fired = false; sx = e.clientX; sy = e.clientY;
+        timer = setTimeout(() => { fired = true; fn(); }, 550);
+    });
+    el.addEventListener('pointermove', (e) => { if (Math.hypot(e.clientX - sx, e.clientY - sy) > 8) cancel(); });
+    el.addEventListener('pointerup', cancel);
+    el.addEventListener('pointercancel', cancel);
+    el.addEventListener('contextmenu', (e) => e.preventDefault());
+    el.addEventListener('click', (e) => { if (fired) { e.stopImmediatePropagation(); e.preventDefault(); fired = false; } }, true);
+}
+
+function stepper(value, min, max, onChange, step = 1) {
     const box = h('div', 'stm-stepper');
     const mk = (icon, label) => { const b = h('button', 'stm-step stm-press'); b.type = 'button'; b.setAttribute('aria-label', label); b.appendChild(h('i', 'fa-solid ' + icon)); return b; };
     const minus = mk('fa-minus', '减少');
@@ -49,8 +78,8 @@ function stepper(value, min, max, onChange) {
         minus.disabled = value <= min;
         plus.disabled = value >= max;
     };
-    minus.addEventListener('click', () => { set(value - 1); onChange(value); });
-    plus.addEventListener('click', () => { set(value + 1); onChange(value); });
+    minus.addEventListener('click', () => { set(value - step); onChange(value); });
+    plus.addEventListener('click', () => { set(value + step); onChange(value); });
     set(value);
     box.append(minus, num, plus);
     return box;
@@ -105,9 +134,23 @@ function languageChips(r) {
     const render = () => {
         box.replaceChildren();
         const toggleLang = (name, on) => { r.langs = on ? [...r.langs.filter((x) => x !== name), name] : r.langs.filter((x) => x !== name); save(); };
-        for (const name of rec.LANGS) box.appendChild(chip(name, r.langs.includes(name), (on) => toggleLang(name, on)));
+        // 长按删除：内置语言记入 hiddenLangs，可恢复；自定义语言直接删除
+        const remove = (name) => {
+            if (rec.LANGS.includes(name)) r.hiddenLangs = [...r.hiddenLangs.filter((x) => x !== name), name];
+            else r.customLangs = r.customLangs.filter((x) => x !== name);
+            r.langs = r.langs.filter((x) => x !== name);
+            save();
+            render();
+            notify(`已删除：${name}`);
+        };
+        for (const name of rec.LANGS.filter((x) => !r.hiddenLangs.includes(x))) {
+            const c = chip(name, r.langs.includes(name), (on) => toggleLang(name, on));
+            onLongPress(c, () => remove(name));
+            box.appendChild(c);
+        }
         for (const name of r.customLangs) {
             const c = chip(name, r.langs.includes(name), (on) => toggleLang(name, on));
+            onLongPress(c, () => remove(name));
             const del = h('i', 'fa-solid fa-xmark stm-chip-del');
             del.title = '删除';
             del.addEventListener('click', (e) => {
@@ -125,12 +168,19 @@ function languageChips(r) {
         add.addEventListener('click', async () => {
             const name = (await askText('输入语言名称')).slice(0, 12);
             if (!name) return;
-            if (!rec.LANGS.includes(name) && !r.customLangs.includes(name)) r.customLangs.push(name);
+            if (rec.LANGS.includes(name)) r.hiddenLangs = r.hiddenLangs.filter((x) => x !== name);
+            else if (!r.customLangs.includes(name)) r.customLangs.push(name);
             if (!r.langs.includes(name)) r.langs.push(name);
             save();
             render();
         });
         box.appendChild(add);
+        if (r.hiddenLangs.length) {
+            const restore = h('button', 'stm-chip stm-chip-add stm-press', '恢复默认语言');
+            restore.type = 'button';
+            restore.addEventListener('click', () => { r.hiddenLangs = []; save(); render(); });
+            box.appendChild(restore);
+        }
     };
     render();
     return box;
@@ -140,15 +190,40 @@ function languageChips(r) {
 export function build(content) {
     const s = settings();
     content.replaceChildren();
-    const group = (name) => content.appendChild(h('div', 'stm-set-group', name));
-    const card = (...children) => { const c = h('div', 'stm-card'); c.append(...children); content.appendChild(c); return c; };
+    let target = content;
+    // 每个板块可折叠，展开状态记在 sections 里
+    const group = (name, key) => {
+        const sec = h('div', 'stm-sec');
+        const head = h('button', 'stm-sec-head stm-press');
+        head.type = 'button';
+        head.append(h('span', 'stm-sec-name', name), h('i', 'fa-solid fa-angle-down stm-sec-arrow'));
+        const body = h('div', 'stm-sec-body');
+        sec.classList.toggle('stm-sec-open', !!s.sections[key]);
+        let closing = 0;
+        head.addEventListener('click', () => {
+            const open = !sec.classList.contains('stm-sec-open') || sec.classList.contains('stm-sec-closing');
+            s.sections[key] = open;
+            save();
+            clearTimeout(closing);
+            sec.classList.remove('stm-sec-closing');
+            if (open) sec.classList.add('stm-sec-open');
+            else {
+                sec.classList.add('stm-sec-closing');
+                closing = setTimeout(() => sec.classList.remove('stm-sec-open', 'stm-sec-closing'), 200);
+            }
+        });
+        sec.append(head, body);
+        content.appendChild(sec);
+        target = body;
+    };
+    const card = (...children) => { const c = h('div', 'stm-card'); c.append(...children); target.appendChild(c); return c; };
 
     card(item('启用', '关闭时隐藏悬浮按钮，并暂停播放。', toggle(s.enabled, (v) => {
         s.enabled = v; save(); ui.setEnabled(v); rec.syncPrompt(); syncKeepAlive();
     })));
 
     // 按剧情选歌
-    group('按剧情选歌');
+    group('按剧情选歌', 'rec');
     const r = s.rec;
     const prefer = h('textarea', 'stm-input stm-textarea');
     prefer.placeholder = '例：减少流行歌曲，增加后摇与纯音乐';
@@ -162,8 +237,13 @@ export function build(content) {
     card(
         item('自动选歌', '在提示词中加入一段说明，要求模型在回复末尾输出隐藏标签，并按标签检索歌曲。该条回复的输出增加数十字；不产生额外的模型调用。', toggle(r.enabled, (v) => { r.enabled = v; save(); rec.syncPrompt(); })),
         item('推荐间隔', '每隔若干条模型回复推荐一次。仅在推荐的那一条回复中加入说明。', stepper(r.every, 1, 20, (v) => { r.every = v; save(); })),
-        item('每次推荐数量', '推荐的歌曲排在当前歌曲之后；当前歌曲播放结束后切换。', stepper(r.count, 1, 10, (v) => { r.count = v; save(); })),
-        block('语言偏好', '未选择时不限制语言。「其他」可添加自定义语言。', languageChips(r)),
+        item('每次推荐数量', '推荐的歌曲排在当前歌曲之后。', stepper(r.count, 1, 10, (v) => { r.count = v; save(); })),
+        block('新推荐到达时', '「重新推荐」始终立即切换。',
+            makeSeg([{ value: 'after', label: '播完当前歌曲后切换' }, { value: 'now', label: '立即切换' }], r.arrive, (v) => { r.arrive = v; save(); })),
+        item('保留的推荐数量', '以前推荐的歌曲保留在播放列表中；超过此数量时移除最早推荐的歌曲。手动加入的歌曲不受影响。', stepper(r.keep, 10, 100, (v) => { r.keep = v; save(); }, 10)),
+        item('避免重复推荐', '最近推荐过的歌曲不再推荐。', toggle(r.noRepeat, (v) => { r.noRepeat = v; save(); })),
+        item('不重复的范围', '按最近推荐的歌曲数量计算。', stepper(r.noRepeatCount, 5, 100, (v) => { r.noRepeatCount = v; save(); }, 5)),
+        block('语言偏好', '未选择时不限制语言。「其他」可添加自定义语言；长按某一语言可将其删除。', languageChips(r)),
         block('推荐偏好', '补充给模型的说明，可留空。', prefer),
         block('排除的版本', '选中的版本不出现在推荐结果中。', chips(rec.VERSIONS.map(([k, name]) => [k, name]), (k) => r.exclude[k], (k, on) => { r.exclude[k] = on; save(); })),
         block('标签维度', '停用的维度不写入标签，可减少输出字数。', chips(rec.DIMS, (k) => r.dims[k], (k, on) => { r.dims[k] = on; save(); })),
@@ -172,18 +252,31 @@ export function build(content) {
     );
 
     // 外观
-    group('外观');
+    group('外观', 'look');
     card(
         block('面板形式', '卡片可拖动顶部移动、按住四角调整大小；全屏占满整个屏幕。',
             makeSeg([{ value: 'card', label: '卡片' }, { value: 'full', label: '全屏' }], s.panelForm, (v) => { s.panelForm = v; save(); ui.applyForm(); })),
+        block('唱片页形式', '收起式：唱片页不显示底栏，左上角按钮返回上一页。底栏式：唱片页显示底栏。两种形式均可左右滑动切换页面。',
+            makeSeg([{ value: 'sheet', label: '收起式' }, { value: 'tab', label: '底栏式' }], s.nowForm, (v) => { s.nowForm = v; save(); ui.applyNowForm(); })),
+        block('打开面板时显示', '',
+            makeSeg([{ value: 'now', label: '唱片' }, { value: 'my', label: '我的' }], s.home, (v) => { s.home = v; save(); })),
+        item('当前歌曲胶囊', '在唱片页以外的页面底部显示当前歌曲，点击进入唱片页。', toggle(s.capsule, (v) => { s.capsule = v; save(); ui.applyNowForm(); })),
         item('双击切换全屏', '双击面板顶部的横杠，在卡片与全屏之间切换。', toggle(s.dblFull, (v) => { s.dblFull = v; save(); })),
         block('动效风格', '',
             makeSeg([{ value: 'spring', label: '弹簧阻尼' }, { value: 'smooth', label: '平滑' }, { value: 'fade', label: '淡入淡出' }], s.motion, (v) => { s.motion = v; save(); ui.applyMotion(); })),
         item('位置', '将悬浮按钮、卡片和歌词长条移回默认位置。', textButton('复位', () => { ui.resetLayout(); strip.sync(); })),
     );
 
+    // 歌词长条
+    group('歌词长条', 'strip');
+    card(
+        block('显示行数', '两行时第二行显示下一句。',
+            makeSeg([{ value: 1, label: '一行' }, { value: 2, label: '两行' }], s.strip.lines, (v) => { s.strip.lines = v; save(); strip.applyStyle(); })),
+        block('透明度', '', range(Math.round(s.strip.opacity * 100), 20, 100, 5, (v) => v + '%', (v) => { s.strip.opacity = v / 100; save(); strip.applyStyle(); })),
+    );
+
     // 悬浮按钮
-    group('悬浮按钮');
+    group('悬浮按钮', 'fab');
     const size = h('input', 'stm-range');
     size.type = 'range';
     size.min = '28'; size.max = '64'; size.step = '2';
@@ -220,18 +313,26 @@ export function build(content) {
     );
 
     // 播放
-    group('播放');
+    group('播放', 'play');
+    const traceBox = h('textarea', 'stm-input stm-textarea stm-code');
+    traceBox.rows = 8;
+    traceBox.readOnly = true;
+    traceBox.style.display = 'none';
+    card(
+        block('播放记录', '记录最近的播放事件（切歌、加载、页面转入后台等），用于排查后台播放中断。仅保存在内存中，刷新页面后清空。',
+            textButton('查看', () => { traceBox.value = player.getTrace() || '暂无记录。'; traceBox.style.display = ''; }), traceBox),
+    );
     card(item('后台保活', '播放期间循环播放一段无声音频，降低页面在后台被系统挂起的可能。效果取决于浏览器和系统的省电设置；会略微增加耗电。', toggle(s.keepAlive, (v) => { s.keepAlive = v; save(); syncKeepAlive(); })));
 
     // 接口
-    group('接口');
+    group('接口', 'api');
     card(
         item('公共接口一', 'api.i-meto.com', toggle(s.providers.imeto, (v) => { s.providers.imeto = v; save(); })),
         item('公共接口二', 'api.vkeys.cn', toggle(s.providers.vkeys, (v) => { s.providers.vkeys = v; save(); })),
         block('自定义接口', 'Meting 格式的接口地址。填写后优先使用；留空时不使用。',
             textInput(s.customMeting, 'https://', (v) => { s.customMeting = v; save(); }, 'url')),
     );
-    content.appendChild(h('div', 'stm-set-note', '接口按上述顺序使用；某一接口连续失败时自动切换到下一个。公共接口仅能播放平台允许免费播放的歌曲。'));
+    target.appendChild(h('div', 'stm-set-note', '接口按上述顺序使用；某一接口连续失败时自动切换到下一个。公共接口仅能播放平台允许免费播放的歌曲。'));
 }
 
 /** 在酒馆的扩展设置页里放一个可折叠的设置区。每次展开时重新生成，保证与面板里的设置一致。 */

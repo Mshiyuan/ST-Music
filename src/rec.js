@@ -1,6 +1,6 @@
 // 按剧情选歌：让 AI 在回复末尾附一个隐藏标签，读取后到曲库搜歌。不额外调用 AI。
 
-import { settings, ctx, notify } from './settings.js';
+import { settings, ctx, notify, save } from './settings.js';
 import { searchSongs, probeTrack } from './sources.js';
 import * as player from './player.js';
 
@@ -29,11 +29,29 @@ let sinceLast = 0;        // 上次推荐之后又来了几条 AI 回复
 let lastTags = null;      // 最近一次读到的标签 { dims: {情绪: …}, search: [...] }
 let runToken = 0;
 let busyListener = null;
+let busy = false;
 const recent = new Set(); // 本次会话里已经推荐过的歌，换一批时避开
 
 export const getLastTags = () => lastTags;
+export const isBusy = () => busy;
 export const onBusy = (fn) => { busyListener = fn; };
-const setBusy = (v) => { if (busyListener) busyListener(v); };
+const setBusy = (v) => { busy = v; if (busyListener) busyListener(v); };
+
+const nameOf = (t) => `${t.title}`.replace(/[\s（(].*$/, '').toLowerCase();
+
+/** 「避免重复推荐」开启时，最近推荐过的歌（按编号或歌名）不再推荐。 */
+function repeated(t) {
+    const r = settings().rec;
+    if (!r.noRepeat) return false;
+    const name = nameOf(t);
+    return r.history.slice(0, r.noRepeatCount).some((x) => { const [k, n] = x.split('|'); return k === t.key || n === name; });
+}
+
+function remember(tracks) {
+    const r = settings().rec;
+    const items = tracks.map((t) => `${t.key}|${nameOf(t)}`);
+    r.history = [...items, ...r.history.filter((x) => !items.includes(x))].slice(0, 200);
+}
 
 /** 默认的说明模板。{{…}} 是变量，生成时替换为实际内容。 */
 export const DEFAULT_PROMPT = [
@@ -42,6 +60,7 @@ export const DEFAULT_PROMPT = [
     '填写要求：',
     '{{维度说明}}',
     '- 搜索：填 2–3 个可以直接在音乐平台搜索歌曲的短语，由氛围、情绪、曲风、乐器等词组成（例如「雨夜 钢琴」「伤感 民谣」），不要填具体歌名。',
+    '- 用户在消息中明确提出想听的音乐类型时，以用户的要求为准填写搜索短语。',
     '{{语言说明}}',
     '{{偏好说明}}',
 ].join('\n');
@@ -124,8 +143,8 @@ async function recommend(manual) {
         for (let i = 0; i < longest; i++) {
             for (const list of lists) {
                 const t = list[i];
-                if (!t || excluded(t)) continue;
-                const name = `${t.title}`.replace(/[\s（(].*$/, '').toLowerCase();
+                if (!t || excluded(t) || repeated(t)) continue;
+                const name = nameOf(t);
                 if (seen.has(t.key) || seen.has(name)) continue;
                 seen.add(t.key); seen.add(name);
                 merged.push({ ...t });
@@ -137,6 +156,8 @@ async function recommend(manual) {
         if (token !== runToken) return;
         if (!picked.length) { if (manual) notify('没有找到可以播放的歌曲', 'warning'); return; }
         picked.forEach((t) => recent.add(t.key));
+        remember(picked);
+        save();
         const n = player.setRecommended(picked, manual);
         if (manual) notify(n ? `已按剧情推荐 ${n} 首` : '推荐结果与当前列表相同');
     } catch (e) {

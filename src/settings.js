@@ -13,13 +13,23 @@ const DEFAULTS = {
     motion: 'spring',             // 'spring' 弹簧阻尼 | 'smooth' 平滑 | 'fade' 淡入淡出
     showTrans: true,              // 歌词页是否显示译文
     keepAlive: false,             // 后台保活
-    strip: { on: false, x: 0.5, y: 0.82 },   // 歌词长条
+    nowForm: 'sheet',             // 唱片页形式：'sheet' 收起式（无底栏，左上角收起）| 'tab' 底栏式（保留底栏，可左右滑动）
+    home: 'now',                  // 打开面板时显示：'now' 唱片 | 'my' 我的
+    capsule: true,                // 其他页面底部显示当前歌曲的胶囊
+    sections: {},                 // 设置页里各板块是否展开
+    strip: { on: false, x: 0.5, y: 0.82, lines: 1, opacity: 1 },   // 歌词长条
     rec: {                        // 按剧情选歌
         enabled: true,
         every: 1,                 // 每隔几条 AI 回复推荐一次
         count: 3,                 // 每次推荐几首
+        arrive: 'after',          // 新推荐到达时：'after' 播完当前歌曲后切换 | 'now' 立即切换
+        keep: 30,                 // 播放列表里最多保留多少首推荐的歌，超出时去掉最早的
+        noRepeat: true,           // 避免重复推荐
+        noRepeatCount: 20,        // 最近多少首不再推荐
+        history: [],              // 最近推荐过的歌（"key|歌名"），新的在前
         langs: [],                // 语言偏好
         customLangs: [],          // 用户自己添加的语言
+        hiddenLangs: [],          // 被删除的内置语言
         prefer: '',               // 自由填写的偏好
         prompt: '',               // 自定义的说明模板；留空使用默认模板
         exclude: { live: false, dj: true, inst: true, cover: false },
@@ -66,6 +76,7 @@ export function settings() {
     if (!store[KEY]) store[KEY] = {};
     const s = fill(store[KEY], DEFAULTS);
     if (s.panelForm !== 'card' && s.panelForm !== 'full') s.panelForm = 'card';   // 旧版的「底部抽屉」已取消
+    if (s.nowForm !== 'sheet' && s.nowForm !== 'tab') s.nowForm = 'sheet';
     return s;
 }
 

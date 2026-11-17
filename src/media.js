@@ -28,7 +28,7 @@ export function syncKeepAlive() {
     const want = settings().enabled && settings().keepAlive && player.isActive();
     if (want) {
         if (!keeper) { keeper = new Audio(silentUrl()); keeper.loop = true; }
-        if (keeper.paused) keeper.play().catch(() => {});
+        if (keeper.paused) keeper.play().then(() => player.trace('保活音频已开始'), (e) => player.trace(`保活音频被拒绝：${(e && e.name) || '未知'}`));
     } else if (keeper && !keeper.paused) {
         keeper.pause();
     }

@@ -155,13 +155,41 @@ function bindResize(corner) {
 
 // ---------- 面板 ----------
 
-/** 「更多」里的四项：全屏时直接排在底部，卡片时收进弹出菜单。 */
-const ENTRIES = [
-    ['fa-user', '我的', () => go('my')],
-    ['fa-tags', '本次标签', () => openTags()],
-    ['fa-wand-magic-sparkles', '重新推荐', () => rec.refresh()],
-    ['fa-gear', '设置', () => go('settings')],
+/** 底栏的四项，按从左到右的顺序；左右滑动时也按这个顺序切换。 */
+const TABS = [
+    ['now', 'fa-compact-disc', '唱片'],
+    ['my', 'fa-user', '我的'],
+    ['pick', 'fa-clapperboard', '选歌'],
+    ['settings', 'fa-gear', '设置'],
 ];
+const TAB_ORDER = TABS.map((t) => t[0]);
+const SWIPE_MIN = 60;          // 横向滑动超过这个距离才切换页面
+let lastTab = 'my';            // 收起唱片页时回到的页面
+let prevView = 'now';          // 从搜索页返回时回到的页面
+
+const sheetNow = () => view === 'now' && settings().nowForm === 'sheet';
+
+/** 左上角按钮：唱片页（收起式）为收起；搜索、详情页为返回；其余为搜索。 */
+function onNav() {
+    if (sheetNow()) go(lastTab);
+    else if (view === 'search' || view === 'detail') back();
+    else go('search');
+}
+
+function renderNav() {
+    if (sheetNow()) setIcon(els.navBtn, 'fa-angle-down', '收起');
+    else if (view === 'search' || view === 'detail') setIcon(els.navBtn, 'fa-arrow-left', '返回');
+    else setIcon(els.navBtn, 'fa-magnifying-glass', '搜索');
+    panel.dataset.now = settings().nowForm;
+    panel.classList.toggle('stm-cap-on', !!settings().capsule);
+    const active = view === 'detail' ? 'my' : view === 'search' ? prevView : view;
+    for (const [k, b] of Object.entries(els.tabs)) b.classList.toggle('stm-on', k === active);
+}
+
+/** 设置里切换唱片页形式或胶囊开关后调用。 */
+export function applyNowForm() {
+    renderNav();
+}
 
 function buildPanel() {
     panel = h('div', 'stm-panel');
@@ -169,14 +197,17 @@ function buildPanel() {
 
     const head = h('div', 'stm-head');
     els.navBtn = iconButton('fa-magnifying-glass', '搜索');
-    els.navBtn.addEventListener('click', () => (view === 'now' ? go('search') : back()));
-    els.moreBtn = iconButton('fa-ellipsis-vertical', '更多', 'stm-more');
-    els.moreBtn.addEventListener('click', () => openMenu());
+    els.navBtn.addEventListener('click', onNav);
+    // 唱片页（收起式）的左上角是收起，搜索放到右侧
+    const search = iconButton('fa-magnifying-glass', '搜索', 'stm-head-search');
+    search.addEventListener('click', () => go('search'));
     const close = iconButton('fa-xmark', '关闭', 'stm-close');
     close.addEventListener('click', () => togglePanel(false));
-    const right = h('div', 'stm-head-right');
-    right.append(els.moreBtn, close);
-    head.append(els.navBtn, h('div', 'stm-grab'), right);
+    const left = h('div', 'stm-head-side');
+    left.appendChild(els.navBtn);
+    const right = h('div', 'stm-head-side stm-head-right');
+    right.append(search, close);
+    head.append(left, h('div', 'stm-grab'), right);
     draggable(head, {
         onStart: () => (isCard() ? applyCard() : null),
         onMove: (dx, dy, b) => {
@@ -202,20 +233,88 @@ function buildPanel() {
     const body = h('div', 'stm-body');
     const page = (name) => { const sec = h('section', 'stm-view stm-page'); sec.dataset.view = name; return sec; };
     els.myPage = page('my');
+    els.pickPage = page('pick');
     els.detailPage = page('detail');
     els.settingsPage = page('settings');
     els.settingsPage.classList.add('stm-settings');
-    body.append(buildNow(), buildSearch(), els.myPage, els.detailPage, els.settingsPage, ...buildSheet());
+    body.append(buildNow(), buildSearch(), els.myPage, els.pickPage, els.detailPage, els.settingsPage, buildFoot(), ...buildSheet());
+    bindSwipe(body);
     panel.append(head, body);
     for (const c of ['nw', 'ne', 'sw', 'se']) bindResize(c);
     document.body.appendChild(panel);
     applyForm();
-    go('now');
+    go(settings().home === 'my' ? 'my' : 'now');
+}
+
+/** 底部：当前歌曲的胶囊（唱片页以外显示）和底栏。 */
+function buildFoot() {
+    const foot = h('div', 'stm-foot');
+    const cap = h('div', 'stm-cap');
+    cap.title = '打开唱片页';
+    els.capCover = h('img', 'stm-cap-cover');
+    els.capCover.alt = '';
+    els.capCover.addEventListener('error', () => { els.capCover.style.visibility = 'hidden'; });
+    els.capCover.addEventListener('load', () => { els.capCover.style.visibility = ''; });
+    const text = h('div', 'stm-cap-text');
+    els.capTitle = h('span', 'stm-cap-title');
+    els.capArtist = h('span', 'stm-cap-artist');
+    text.append(els.capTitle, els.capArtist);
+    els.capPlay = iconButton('fa-play', '播放', 'stm-small');
+    els.capPlay.addEventListener('click', (e) => { e.stopPropagation(); player.toggle(); });
+    const list = iconButton('fa-list', '播放列表', 'stm-small');
+    list.addEventListener('click', (e) => { e.stopPropagation(); openQueue(); });
+    cap.append(els.capCover, text, els.capPlay, list);
+    cap.addEventListener('click', () => go('now'));
+
+    const tabs = h('div', 'stm-tabs');
+    els.tabs = {};
+    for (const [name, icon, title] of TABS) {
+        const b = iconButton(icon, title, 'stm-tab');
+        b.addEventListener('click', () => go(name));
+        els.tabs[name] = b;
+        tabs.appendChild(b);
+    }
+    foot.append(cap, tabs);
+    return foot;
+}
+
+/** 左右滑动切换底栏的各页。进度条、输入框、歌词、弹出层上的滑动不算。 */
+function bindSwipe(body) {
+    let sx = 0, sy = 0, armed = false;
+    body.addEventListener('pointerdown', (e) => {
+        armed = !e.target.closest('.stm-bar, input, textarea, select, .stm-seg, .stm-sheet, .stm-lyrics, .stm-scrub, .stm-cap');
+        sx = e.clientX; sy = e.clientY;
+    });
+    body.addEventListener('pointercancel', () => { armed = false; });
+    body.addEventListener('pointerup', (e) => {
+        if (!armed) return;
+        armed = false;
+        const dx = e.clientX - sx, dy = e.clientY - sy;
+        if (Math.abs(dx) < SWIPE_MIN || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+        const cur = view === 'detail' ? 'my' : view;
+        const j = TAB_ORDER.indexOf(cur) + (dx < 0 ? 1 : -1);
+        if (TAB_ORDER.indexOf(cur) < 0 || j < 0 || j >= TAB_ORDER.length) return;
+        // 滑动结束时不再触发点击（例如点唱片切换歌词）
+        const stop = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
+        body.addEventListener('click', stop, true);
+        setTimeout(() => body.removeEventListener('click', stop, true), 0);
+        go(TAB_ORDER[j]);
+    });
+}
+
+/** 设置页面进出的方向：底栏各页之间横向移动，其余保持默认。 */
+function prepareView(el, from) {
+    if (!el) return;
+    const shown = el.classList.contains('stm-show');
+    if (!shown) el.classList.add('stm-noanim');
+    if (from) el.style.setProperty('--stm-from', from); else el.style.removeProperty('--stm-from');
+    if (!shown) { void el.offsetWidth; el.classList.remove('stm-noanim'); }
 }
 
 export function togglePanel(force) {
     const open = force === undefined ? !panel.classList.contains('stm-open') : force;
     if (open === panel.classList.contains('stm-open')) return;
+    if (open) go(settings().home === 'my' ? 'my' : 'now');
     setOrigin();
     panel.classList.toggle('stm-open', open);
     fab.classList.toggle('stm-active', open);
@@ -223,25 +322,37 @@ export function togglePanel(force) {
     if (open) { invalidateLayout(); scrollLyric(true); } else closeSheet();
 }
 
-const TITLES = { search: '返回', my: '返回', detail: '返回', settings: '返回' };
+const viewEl = (v) => panel.querySelector(`.stm-view[data-view="${v}"]`);
 
 /** 切换页面。detail 页需要 arg 指明显示什么。 */
 export function go(v, arg) {
+    const from = view;
+    if (v === 'search' && from !== 'search') prevView = from === 'detail' ? 'my' : from;
+    if (v !== 'now' && TAB_ORDER.includes(v)) lastTab = v;
     view = v;
     if (v === 'detail') detailArg = arg;
     if (v === 'my') my.renderMy(els.myPage, api);
+    if (v === 'pick') renderPick();
     if (v === 'detail') my.renderDetail(els.detailPage, detailArg, api);
     if (v === 'settings') buildSettings(els.settingsPage);
+    if (from !== v) {
+        const a = TAB_ORDER.indexOf(from), b = TAB_ORDER.indexOf(v);
+        const sheetEdge = settings().nowForm === 'sheet' && (from === 'now' || v === 'now');
+        const horiz = a >= 0 && b >= 0 && !sheetEdge && document.documentElement.dataset.stmMotion !== 'fade';
+        const dir = b > a ? 1 : -1;
+        prepareView(viewEl(from), horiz ? `translateX(${-dir * 36}px)` : null);
+        prepareView(viewEl(v), horiz ? `translateX(${dir * 36}px)` : null);
+    }
     for (const el of panel.querySelectorAll('.stm-view')) el.classList.toggle('stm-show', el.dataset.view === v);
-    setIcon(els.navBtn, v === 'now' ? 'fa-magnifying-glass' : 'fa-arrow-left', TITLES[v] || '搜索');
     panel.dataset.view = v;
+    renderNav();
     closeSheet();
     if (v === 'search') setTimeout(() => { if (window.matchMedia('(pointer: fine)').matches) els.input.focus(); }, 60);
     if (v === 'now') scrollLyric(true);
 }
 
 function back() {
-    go(view === 'detail' ? 'my' : 'now');
+    go(view === 'detail' ? 'my' : prevView || 'now');
 }
 
 // ---------- 播放页 ----------
@@ -355,6 +466,7 @@ function buildNow() {
 
     const ctrl = h('div', 'stm-ctrl');
     els.mode = iconButton('fa-repeat', '列表循环', 'stm-mode');
+    els.mode.insertAdjacentHTML('beforeend', ONE_SVG);
     els.mode.addEventListener('click', () => { player.cycleMode(); });
     const prev = iconButton('fa-backward-step', '上一首');
     prev.addEventListener('click', () => player.prev());
@@ -366,17 +478,15 @@ function buildNow() {
     els.listBtn.addEventListener('click', () => (sheetKind === 'queue' ? closeSheet() : openQueue()));
     ctrl.append(els.mode, prev, els.play, next, els.listBtn);
 
-    // 全屏时显示的一行入口图标
-    const dock = h('div', 'stm-dock');
-    for (const [icon, title, fn] of ENTRIES) {
-        const b = iconButton(icon, title, 'stm-small');
-        b.addEventListener('click', fn);
-        dock.appendChild(b);
-    }
-
-    sec.append(stage, meta, prog, ctrl, dock);
+    sec.append(stage, meta, prog, ctrl);
     return sec;
 }
+
+/** 单曲循环图标：循环箭头和中间的 1 画在同一个图形里，粗细一致。 */
+const ONE_SVG = '<svg class="stm-one-svg" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    + '<path d="M4 11.5V10a3.5 3.5 0 0 1 3.5-3.5H19"/><path d="M16 3.5l3 3-3 3"/>'
+    + '<path d="M20 12.5V14a3.5 3.5 0 0 1-3.5 3.5H5"/><path d="M8 20.5l-3-3 3-3"/>'
+    + '<path d="M10.8 10.6l1.6-1.1v5" stroke-width="1.7"/></svg>';
 
 function setProgress(ratio) {
     els.bar.style.setProperty('--p', clamp(ratio, 0, 1));
@@ -424,6 +534,10 @@ function renderTrack() {
     els.cur.textContent = '0:00';
     els.dur.textContent = '0:00';
     renderMetaButtons();
+    panel.classList.toggle('stm-has-track', !!t);
+    els.capTitle.textContent = t ? t.title : '';
+    els.capArtist.textContent = t ? ` - ${t.artist}` : '';
+    if (t && t.cover) els.capCover.src = t.cover; else { els.capCover.removeAttribute('src'); els.capCover.style.visibility = 'hidden'; }
     if (settings().fabIcon.type === 'cover') renderFab();
     if (sheetKind === 'queue') renderQueue();
 }
@@ -437,6 +551,7 @@ const MODE = {
 function renderState() {
     const playing = player.state.playing;
     setIcon(els.play, player.state.loading ? 'fa-spinner fa-spin' : playing ? 'fa-pause' : 'fa-play', playing ? '暂停' : '播放');
+    setIcon(els.capPlay, playing ? 'fa-pause' : 'fa-play', playing ? '暂停' : '播放');
     panel.classList.toggle('stm-playing', playing);
     fab.classList.toggle('stm-playing', playing);
     const mode = settings().mode;
@@ -497,7 +612,7 @@ function updateLyric(t) {
     if (kids[lyricIndex]) kids[lyricIndex].classList.remove('stm-now');
     lyricIndex = i;
     if (kids[i]) kids[i].classList.add('stm-now');
-    strip.setLine(i >= 0 ? lines[i].text : '');
+    strip.setLine(i >= 0 ? lines[i].text : '', lines[i + 1] ? lines[i + 1].text : '');
     scrollLyric(false);
     updateScrub();
 }
@@ -663,7 +778,7 @@ function renderQueue() {
 }
 
 function openQueue() {
-    els.refresh = iconButton('fa-wand-magic-sparkles', '按剧情重新推荐');
+    els.refresh = iconButton('fa-dice', '按剧情重新推荐');
     els.refresh.addEventListener('click', () => rec.refresh());
     openSheet('queue', '播放列表', () => {}, els.refresh);
     renderQueue();
@@ -677,24 +792,27 @@ function menuRow(icon, label, fn, i) {
     return row;
 }
 
-function openMenu() {
-    openSheet('menu', '更多', (body) => {
-        ENTRIES.forEach(([icon, label, fn], i) => body.appendChild(menuRow(icon, label, () => { closeSheet(); fn(); }, i)));
-    });
-}
-
-function openTags() {
-    openSheet('tags', '本次标签', (body) => {
-        const tags = rec.getLastTags();
-        if (!tags) { hint(body, '尚未取得标签。模型回复一次后显示。'); return; }
+/** 「选歌」页：本次标签与重新推荐。 */
+function renderPick() {
+    const box = els.pickPage;
+    box.replaceChildren();
+    const bar = h('div', 'stm-sec-bar');
+    els.pickRefresh = iconButton(rec.isBusy() ? 'fa-spinner fa-spin' : 'fa-dice', '重新推荐', 'stm-small');
+    els.pickRefresh.addEventListener('click', () => rec.refresh());
+    bar.append(h('div', 'stm-sec-title', '本次标签'), els.pickRefresh);
+    const list = h('div', 'stm-list');
+    const tags = rec.getLastTags();
+    if (!tags) hint(list, '尚未取得标签。模型回复一次后显示。');
+    else {
         const rows = [...Object.entries(tags.dims), ['搜索', tags.search.join('；')]].filter(([, v]) => v);
         rows.forEach(([k, v], i) => {
             const row = h('div', 'stm-row stm-tag-row');
             row.style.setProperty('--i', i);
             row.append(h('span', 'stm-tag-key', k), h('span', 'stm-tag-value', v));
-            body.appendChild(row);
+            list.appendChild(row);
         });
-    });
+    }
+    box.append(bar, list, h('div', 'stm-set-desc stm-pick-note', '「重新推荐」使用同一组标签检索另一批歌曲，不调用模型。相关设置位于「设置」中的「按剧情选歌」。'));
 }
 
 /** 选择要加入的歌单。 */
@@ -759,7 +877,10 @@ export function init() {
         if (view === 'my') my.renderMy(els.myPage, api);
         if (view === 'detail') my.renderDetail(els.detailPage, detailArg, api);
     });
-    rec.onBusy((busy) => { if (els.refresh) setIcon(els.refresh, busy ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'); });
+    rec.onBusy((busy) => {
+        for (const b of [els.refresh, els.pickRefresh]) if (b) setIcon(b, busy ? 'fa-spinner fa-spin' : 'fa-dice');
+        if (!busy && view === 'pick') renderPick();
+    });
     window.addEventListener('resize', () => { placeFab(); applyCard(); invalidateLayout(); scrollLyric(true); });
     renderTrack();
     renderState();
