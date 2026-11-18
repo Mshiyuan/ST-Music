@@ -2,13 +2,14 @@
 
 import { settings, save, notify } from './settings.js';
 import { h, iconButton, setIcon, fmt, clamp, draggable, songRow, hint } from './dom.js';
-import { searchSongs } from './sources.js';
+import { searchSongs, getSong } from './sources.js';
 import * as player from './player.js';
 import * as rec from './rec.js';
 import * as library from './library.js';
 import * as strip from './strip.js';
 import * as my from './my.js';
-import { build as buildSettings } from './settingsUi.js';
+import { build as buildSettings, refreshBlockList } from './settingsUi.js';
+import * as spring from './spring.js';
 
 const MIN_W = 280;
 const MIN_H = 400;
@@ -224,9 +225,7 @@ function buildPanel() {
         const now = Date.now();
         if (now - lastHeadTap < DOUBLE_TAP) {
             lastHeadTap = 0;
-            settings().panelForm = isCard() ? 'full' : 'card';
-            save();
-            applyForm();
+            toggleFormAnimated();
         } else lastHeadTap = now;
     });
 
@@ -244,7 +243,68 @@ function buildPanel() {
     for (const c of ['nw', 'ne', 'sw', 'se']) bindResize(c);
     document.body.appendChild(panel);
     applyForm();
+    applyDiscStyle();
+    applyCustomCss();
     go(settings().home === 'my' ? 'my' : 'now');
+}
+
+let formRun = null;   // 正在进行的卡片 / 全屏切换动画
+
+/**
+ * 卡片与全屏之间切换，带过渡：
+ * 先记下切换前面板在屏幕上的位置和大小，立即换成新布局，再让面板外框从旧的位置和大小过渡到新的。
+ * 外框用 translate + scale，内容做反向缩放保持原大小（不变形），超出外框的部分被裁掉；圆角按缩放比例修正。
+ * 只改 transform，使用与页面切换相同的弹簧。
+ */
+function toggleFormAnimated() {
+    const toForm = isCard() ? 'full' : 'card';
+    const animated = canSlide() && panel.classList.contains('stm-open');
+    const first = panel.getBoundingClientRect();
+    const r0 = formRun ? formRun.radius() : parseFloat(getComputedStyle(panel).borderTopLeftRadius) || 0;
+    if (formRun) { formRun.cancel(); formRun = null; }
+    settings().panelForm = toForm;
+    save();
+    applyForm();
+    if (!animated) return;
+    const last = panel.getBoundingClientRect();
+    if (!last.width || !last.height) return;
+    const r1 = parseFloat(getComputedStyle(panel).borderTopLeftRadius) || 0;
+    const sx0 = first.width / last.width, sy0 = first.height / last.height;
+    const dx0 = first.left - last.left, dy0 = first.top - last.top;
+    const kids = [...panel.children].map((c) => [c, c.offsetLeft, c.offsetTop]);
+    const at = (p) => ({ sx: sx0 + (1 - sx0) * p, sy: sy0 + (1 - sy0) * p, dx: dx0 * (1 - p), dy: dy0 * (1 - p), r: r0 + (r1 - r0) * p });
+    const targets = [[panel, (p) => {
+        const s = at(p);
+        return { transformOrigin: '0 0', transform: `translate(${s.dx}px, ${s.dy}px) scale(${s.sx}, ${s.sy})`, borderRadius: `${s.r / s.sx}px / ${s.r / s.sy}px` };
+    }]];
+    for (const [c, ox, oy] of kids) {
+        targets.push([c, (p) => {
+            const s = at(p);
+            return { transformOrigin: '0 0', transform: `translate(${(1 / s.sx - 1) * ox}px, ${(1 / s.sy - 1) * oy}px) scale(${1 / s.sx}, ${1 / s.sy})` };
+        }]);
+    }
+    // 新布局的第一帧需要重新绘制背景模糊，耗时可能较长；动画的时钟在这一帧期间照常走，会造成跳帧。
+    // 因此先把面板定在起点，等新布局画出一帧后再开始动画。
+    const origin = panel.style.transformOrigin;
+    const hold = () => { for (const [el, fr] of targets) Object.assign(el.style, fr(0)); };
+    const release = () => {
+        for (const [el] of targets) { el.style.transform = ''; el.style.transformOrigin = ''; el.style.borderRadius = ''; }
+        panel.style.transformOrigin = origin;
+    };
+    let ctl = null;
+    const run = {
+        cancel: () => { if (ctl) ctl.cancel(); release(); panel.classList.remove('stm-form-moving'); },
+        radius: () => at(ctl ? ctl.value() : 0).r,
+    };
+    formRun = run;
+    panel.classList.add('stm-form-moving');
+    hold();
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (formRun !== run) return;
+        ctl = spring.animate({ from: 0, to: 1, rest: 0.001, targets });
+        release();
+        ctl.finished.then((done) => { if (done && formRun === run) { formRun = null; run.cancel(); } });
+    }));
 }
 
 /** 底部：当前歌曲的胶囊（唱片页以外显示）和底栏。 */
@@ -282,9 +342,7 @@ function buildFoot() {
 
 /** 可以左右滑动切换的页面：收起式下唱片页不在其中（它从底部升起）。 */
 const slideOrder = () => (settings().nowForm === 'sheet' ? TAB_ORDER.slice(1) : TAB_ORDER);
-const SLIDE_EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';   // 不越过终点，避免两页之间露出空隙
-const SLIDE_DUR = 460;
-const canSlide = () => document.documentElement.dataset.stmMotion !== 'fade' && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+export const canSlide = () => document.documentElement.dataset.stmMotion !== 'fade' && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /** 为某一页准备内容（拖动时提前显示相邻页用）。 */
 function renderView(v) {
@@ -293,110 +351,174 @@ function renderView(v) {
     if (v === 'settings') buildSettings(els.settingsPage, 'pages');
 }
 
-let slideAnims = [];
+/**
+ * 正在进行的横向移动：cur 为目标页（最终停在 0），side 为另一页，位于 cur 的 sideDir 一侧（1 右、-1 左）。
+ * 回弹时 cur 就是原来的页，side 为露出的相邻页。
+ */
+let slideRun = null;
+
 function stopSlide() {
-    const els2 = [...panel.querySelectorAll('.stm-view.stm-leaving, .stm-view.stm-sliding')];
-    // 移出的页面直接隐藏，不再播放 CSS 的退出过渡，否则它会在原位闪一下
-    for (const el of els2) if (el.classList.contains('stm-leaving')) el.classList.add('stm-noanim');
-    for (const a of slideAnims) a.cancel();
-    slideAnims = [];
-    for (const el of els2) el.classList.remove('stm-leaving', 'stm-sliding');
-    if (els2.length) {
+    const run = slideRun;
+    slideRun = null;
+    if (run) run.ctl.cancel();
+    const list = [...panel.querySelectorAll('.stm-view.stm-leaving, .stm-view.stm-sliding')];
+    // 移出的页面直接隐藏，不播放 CSS 的退出过渡，否则退出过渡会在原位置显示一帧
+    for (const el of list) if (el.classList.contains('stm-leaving')) el.classList.add('stm-noanim');
+    for (const el of list) { el.classList.remove('stm-leaving', 'stm-sliding'); el.style.transform = ''; }
+    if (list.length) {
         void els.body.offsetWidth;
-        for (const el of els2) el.classList.remove('stm-noanim');
+        for (const el of list) el.classList.remove('stm-noanim');
     }
 }
 
-/** 两页一起横向移动：旧页移出，新页移入。start 是拖动已经走过的距离。 */
-function slide(fromEl, toEl, dir, start = 0) {
+/**
+ * 两页一起横向移动，使用弹簧（spring.PAGE_SPRING）。
+ * cur 从位移 x0 移到 0，side 始终紧贴在 cur 的 sideDir 一侧；v0 为初速度（像素每秒）。
+ */
+function runSlide(cur, side, sideDir, x0, v0 = 0) {
     stopSlide();
     const w = els.body.clientWidth;
-    fromEl.classList.add('stm-leaving', 'stm-sliding');
-    toEl.classList.add('stm-sliding');
-    fromEl.style.transform = '';
-    toEl.style.transform = '';
-    const opts = { duration: SLIDE_DUR, easing: SLIDE_EASE, fill: 'forwards' };
-    const a = fromEl.animate([{ transform: `translateX(${start}px)` }, { transform: `translateX(${-dir * w}px)` }], opts);
-    const b = toEl.animate([{ transform: `translateX(${dir * w + start}px)` }, { transform: 'translateX(0)' }], opts);
-    slideAnims = [a, b];
-    b.onfinish = () => { if (slideAnims[1] === b) stopSlide(); };
+    cur.classList.add('stm-sliding');
+    if (side) side.classList.add('stm-leaving', 'stm-sliding');
+    const targets = [[cur, (p) => ({ transform: `translateX(${p}px)` })]];
+    if (side) targets.push([side, (p) => ({ transform: `translateX(${p + sideDir * w}px)` })]);
+    const ctl = spring.animate({ from: x0, to: 0, v0, rest: 0.4, targets });
+    const run = { ctl, cur, side, sideDir };
+    slideRun = run;
+    ctl.finished.then((done) => { if (done && slideRun === run) stopSlide(); });
 }
 
-/** 左右滑动切换页面：页面跟随手指移动，松手后按距离和速度决定切换或回弹。 */
-function bindSwipe(body) {
-    let sx = 0, sy = 0, st = 0, armed = false, dragging = false, cur = null, peek = null, peekDir = 0, lastX = 0, lastT = 0, vx = 0;
-    const order = () => slideOrder();
-    const neighbor = (dir) => { const o = order(); const i = o.indexOf(view === 'detail' ? 'my' : view); return i < 0 ? null : o[i + dir] || null; };
-    const setPeek = (dir) => {
-        if (peekDir === dir) return;
-        if (peek) { peek.classList.remove('stm-peek'); peek.style.transform = ''; }
-        peek = null; peekDir = dir;
-        const v = neighbor(dir);
-        if (!v) return;
-        renderView(v);
-        peek = viewEl(v);
-        peek.classList.add('stm-peek');
+/** 切换页面时的移动：新页从 dir 一侧进入。start 为拖动已经走过的距离，v0 为松手时的速度。 */
+function slide(fromEl, toEl, dir, start = 0, v0 = 0) {
+    const w = els.body.clientWidth;
+    runSlide(toEl, fromEl, -dir, dir * w + start, v0);
+}
+
+/**
+ * 横向拖动的通用处理：页面与手指位移 1:1 跟随；没有相邻页的一侧施加阻力；
+ * 松手时目标 = round(位置 + 速度 × 0.15)（以页为单位），然后用弹簧吸附，初速度取松手时的速度。
+ * 动画进行中再次按住，页面停在当前位置并继续跟随手指。
+ * opts.canStart(e)：本次按下是否处理；opts.neighbor(dir)：dir 一侧的相邻页元素（没有则返回 null）；
+ * opts.caught()：正在移动时返回 { cur, side, sideDir, x }，并停止移动；
+ * opts.current()：当前页元素；opts.commit(dir, x, v)：切换到 dir 一侧；opts.settle(cur, side, sideDir, x, v)：回到当前页。
+ */
+export function bindPager(el, opts) {
+    let armed = false, dragging = false, sx = 0, sy = 0, base = 0, cur = null, side = null, sideDir = 0, x = 0;
+    const vt = spring.velocityTracker();
+    const setSide = (dir) => {
+        if (sideDir === dir && side) return;
+        if (side) { side.classList.remove('stm-peek'); side.style.transform = ''; }
+        side = opts.neighbor(dir);
+        sideDir = side ? dir : 0;
+        if (side) side.classList.add('stm-peek');
     };
-    const reset = () => {
-        if (cur) { cur.classList.remove('stm-dragging'); cur.style.transform = ''; }
-        if (peek) { peek.classList.remove('stm-peek'); peek.style.transform = ''; }
-        cur = null; peek = null; peekDir = 0; dragging = false;
+    const place = () => {
+        const w = el.clientWidth;
+        cur.style.transform = `translateX(${x}px)`;
+        if (side) side.style.transform = `translateX(${x + sideDir * w}px)`;
     };
-    body.addEventListener('pointerdown', (e) => {
-        armed = canSlide() && order().includes(view === 'detail' ? 'my' : view)
-            && !e.target.closest('.stm-bar, input, textarea, select, .stm-seg, .stm-sheet, .stm-lyrics, .stm-scrub, .stm-cap, .stm-range, .stm-set-in');
-        sx = lastX = e.clientX; sy = e.clientY; st = lastT = e.timeStamp; vx = 0;
-    });
-    body.addEventListener('pointermove', (e) => {
+    const down = (e) => {
+        armed = !e.button && opts.canStart(e);
+        if (!armed) return;
+        sx = e.clientX; sy = e.clientY;
+        vt.reset(e.clientX, e.timeStamp);
+        dragging = false;
+        // 正在移动时按住：停在当前位置，从这里继续跟随手指
+        const run = opts.caught();
+        if (run) {
+            dragging = true;
+            cur = run.cur; base = run.x; x = base;
+            cur.classList.add('stm-dragging');
+            if (run.side) { side = run.side; sideDir = run.sideDir; side.classList.add('stm-peek'); }
+            place();
+        }
+    };
+    const move = (e) => {
         if (!armed) return;
         const dx = e.clientX - sx, dy = e.clientY - sy;
         if (!dragging) {
             if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) { armed = false; return; }
             if (Math.abs(dx) < 10) return;
             dragging = true;
-            stopSlide();
-            cur = viewEl(view);
+            cur = opts.current();
+            base = 0;
             cur.classList.add('stm-dragging');
         }
-        vx = (e.clientX - lastX) / Math.max(1, e.timeStamp - lastT);
-        lastX = e.clientX; lastT = e.timeStamp;
-        const dir = dx < 0 ? 1 : -1;
-        setPeek(dir);
-        const w = els.body.clientWidth;
-        const x = peek ? dx : dx * 0.3;   // 没有相邻页时只移动一小段，表示已到尽头
-        cur.style.transform = `translateX(${x}px)`;
-        if (peek) peek.style.transform = `translateX(${dir * w + dx}px)`;
-    });
+        vt.add(e.clientX, e.timeStamp);
+        const raw = base + dx;
+        const dir = raw < 0 ? 1 : -1;
+        if (raw !== 0) setSide(dir);
+        const w = el.clientWidth;
+        x = side && sideDir === dir ? Math.max(-w, Math.min(w, raw)) : spring.rubber(raw, w);
+        place();
+    };
+    el.addEventListener('pointerdown', down);
+    el.addEventListener('pointermove', move);
     const end = (e, cancelled) => {
         if (!armed) return;
         armed = false;
         if (!dragging) return;
-        const dx = e.clientX - sx;
-        const w = els.body.clientWidth;
-        const dir = dx < 0 ? 1 : -1;
-        const target = peek && !cancelled && (Math.abs(dx) > w * 0.22 || (Math.abs(vx) > 0.45 && Math.sign(vx) === -dir)) ? neighbor(dir) : null;
-        // 拖动结束时不再触发点击（例如点唱片切换歌词）
+        dragging = false;
+        // 拖动结束时不触发点击（例如点唱片切换歌词）
         const stop = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
-        body.addEventListener('click', stop, true);
-        setTimeout(() => body.removeEventListener('click', stop, true), 0);
-        const from = cur, pk = peek;
-        const x = peek ? dx : dx * 0.3;
-        reset();
-        if (target) { go(target, undefined, { start: dx }); return; }
-        // 回弹
-        const opts = { duration: SLIDE_DUR, easing: SLIDE_EASE, fill: 'forwards' };
-        stopSlide();
-        from.classList.add('stm-sliding');
-        const anims = [from.animate([{ transform: `translateX(${x}px)` }, { transform: 'translateX(0)' }], opts)];
-        if (pk) {
-            pk.classList.add('stm-leaving', 'stm-sliding');
-            anims.push(pk.animate([{ transform: `translateX(${dir * w + dx}px)` }, { transform: `translateX(${dir * w}px)` }], opts));
-        }
-        slideAnims = anims;
-        anims[0].onfinish = () => { if (slideAnims[0] === anims[0]) stopSlide(); };
+        el.addEventListener('click', stop, true);
+        setTimeout(() => el.removeEventListener('click', stop, true), 0);
+        const w = el.clientWidth;
+        const v = cancelled ? 0 : vt.get();
+        // 位置以页为单位：向左拖为正（朝右侧的页）
+        const lo = side && sideDir === -1 ? -1 : 0;
+        const hi = side && sideDir === 1 ? 1 : 0;
+        const target = cancelled ? 0 : spring.snapTarget(-x / w, -v / w, lo, hi);
+        const c = cur, s = side, sd = sideDir, x0 = x;
+        cur.classList.remove('stm-dragging');
+        if (side) side.classList.remove('stm-peek');
+        cur = null; side = null; sideDir = 0;
+        if (target !== 0) opts.commit(target, x0, v, sd === target ? s : null);
+        else opts.settle(c, s, sd, x0, v);
     };
-    body.addEventListener('pointerup', (e) => end(e, false));
-    body.addEventListener('pointercancel', (e) => end(e, true));
+    const up = (e) => end(e, false);
+    const cancel = (e) => end(e, true);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', cancel);
+    // 返回解除绑定的函数
+    return () => {
+        el.removeEventListener('pointerdown', down);
+        el.removeEventListener('pointermove', move);
+        el.removeEventListener('pointerup', up);
+        el.removeEventListener('pointercancel', cancel);
+    };
+}
+
+/** 主页面左右滑动切换。 */
+function bindSwipe(body) {
+    const pageOf = () => (view === 'detail' ? 'my' : view);
+    const neighborView = (dir) => { const o = slideOrder(); const i = o.indexOf(pageOf()); return i < 0 ? null : o[i + dir] || null; };
+    bindPager(body, {
+        canStart: (e) => canSlide() && slideOrder().includes(pageOf())
+            && !e.target.closest('.stm-bar, input, textarea, select, .stm-seg, .stm-sheet, .stm-lyrics, .stm-scrub, .stm-cap, .stm-range, .stm-set-in, .stm-set-moving'),
+        neighbor: (dir) => { const v = neighborView(dir); if (!v) return null; renderView(v); return viewEl(v); },
+        current: () => { stopSlide(); return viewEl(view); },
+        caught: () => {
+            const run = slideRun;
+            if (!run || run.cur !== viewEl(view)) return null;
+            const x = run.ctl.value();
+            slideRun = null;
+            run.ctl.cancel();
+            run.cur.classList.remove('stm-sliding');
+            if (run.side) run.side.classList.remove('stm-leaving', 'stm-sliding');
+            return { cur: run.cur, side: run.side, sideDir: run.sideDir, x };
+        },
+        // 露出的那一页就是切换的目标（点底栏跳页途中被按住时，露出的页不一定是顺序上的相邻页）
+        commit: (dir, x, v, sideEl) => {
+            const target = sideEl ? sideEl.dataset.view : neighborView(dir);
+            if (target) go(target, undefined, { start: x, v0: v, dir });
+        },
+        settle: (cur, side, sideDir, x, v) => {
+            cur.style.transform = '';
+            if (side) side.style.transform = '';
+            runSlide(cur, side, sideDir, x, v);
+        },
+    });
 }
 
 export function togglePanel(force) {
@@ -412,7 +534,7 @@ export function togglePanel(force) {
 
 const viewEl = (v) => panel.querySelector(`.stm-view[data-view="${v}"]`);
 
-/** 切换页面。detail 页需要 arg 指明显示什么。opts.start：拖动切换时已经移动的距离。 */
+/** 切换页面。detail 页需要 arg 指明显示什么。opts.start：拖动切换时已经移动的距离；opts.v0：松手时的速度；opts.dir：新页进入的方向。 */
 export function go(v, arg, opts = {}) {
     const from = view;
     if (v === 'search' && from !== 'search') prevView = from === 'detail' ? 'my' : from;
@@ -424,7 +546,7 @@ export function go(v, arg, opts = {}) {
     if (from !== v) {
         const o = slideOrder();
         const a = o.indexOf(from), b = o.indexOf(v);
-        if (a >= 0 && b >= 0 && canSlide() && panel.classList.contains('stm-open')) slide(viewEl(from), viewEl(v), b > a ? 1 : -1, opts.start || 0);
+        if (a >= 0 && b >= 0 && canSlide() && panel.classList.contains('stm-open')) slide(viewEl(from), viewEl(v), opts.dir || (b > a ? 1 : -1), opts.start || 0, opts.v0 || 0);
         else stopSlide();
     }
     for (const el of panel.querySelectorAll('.stm-view')) el.classList.toggle('stm-show', el.dataset.view === v);
@@ -457,8 +579,20 @@ function buildNow() {
     disc.append(els.cover, h('div', 'stm-disc-hole'));
     const arm = h('div', 'stm-arm');
     arm.append(h('div', 'stm-arm-base'), h('div', 'stm-arm-bar'), h('div', 'stm-arm-head'));
+    // 磁带样式：外壳、标签（左上角为专辑封面）、窗口里的两个转轴、下方的磁头槽
+    const tape = h('div', 'stm-tape');
+    const label = h('div', 'stm-tape-label');
+    els.tapeCover = h('img', 'stm-tape-cover');
+    els.tapeCover.alt = '';
+    els.tapeCover.addEventListener('error', () => { els.tapeCover.style.visibility = 'hidden'; });
+    els.tapeCover.addEventListener('load', () => { els.tapeCover.style.visibility = ''; });
+    els.tapeTitle = h('div', 'stm-tape-title');
+    label.append(els.tapeCover, els.tapeTitle, h('div', 'stm-tape-side', 'A'));
+    const win = h('div', 'stm-tape-window');
+    win.append(h('div', 'stm-reel stm-reel-l'), h('div', 'stm-tape-band'), h('div', 'stm-reel stm-reel-r'));
+    tape.append(label, win, h('div', 'stm-tape-foot'), h('div', 'stm-tape-screw stm-s1'), h('div', 'stm-tape-screw stm-s2'));
     // 反光不随唱片转动，所以放在唱片外面
-    deck.append(disc, h('div', 'stm-disc-sheen'), arm);
+    deck.append(disc, h('div', 'stm-disc-sheen'), arm, tape);
     discWrap.appendChild(deck);
 
     els.lyrics = h('div', 'stm-lyrics');
@@ -566,6 +700,60 @@ function buildNow() {
     return sec;
 }
 
+// ---------- 唱片样式、封面取色、自定义 CSS ----------
+
+let colorToken = 0;
+
+/**
+ * 从封面取主色，写入面板的 --stm-cover-rgb（彩胶、磁带标签和「封面取色」配色使用）。
+ * 取法：缩小到 24×24，跳过过暗、过亮和饱和度很低的像素，按饱和度加权平均。
+ * 封面不允许跨域读取时（画布被污染），保留主题的强调色。
+ */
+function applyCoverColor(src) {
+    const token = ++colorToken;
+    if (!src) { panel.style.removeProperty('--stm-cover-rgb'); return; }
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+        if (token !== colorToken) return;
+        try {
+            const c = document.createElement('canvas');
+            c.width = c.height = 24;
+            const g = c.getContext('2d', { willReadFrequently: true });
+            g.drawImage(img, 0, 0, 24, 24);
+            const d = g.getImageData(0, 0, 24, 24).data;
+            let r = 0, gg = 0, b = 0, w = 0;
+            for (let i = 0; i < d.length; i += 4) {
+                const max = Math.max(d[i], d[i + 1], d[i + 2]), min = Math.min(d[i], d[i + 1], d[i + 2]);
+                const sat = max ? (max - min) / max : 0;
+                if (max < 40 || min > 235) continue;
+                const k = 0.15 + sat;
+                r += d[i] * k; gg += d[i + 1] * k; b += d[i + 2] * k; w += k;
+            }
+            if (!w) { panel.style.removeProperty('--stm-cover-rgb'); return; }
+            panel.style.setProperty('--stm-cover-rgb', `${Math.round(r / w)}, ${Math.round(gg / w)}, ${Math.round(b / w)}`);
+        } catch (e) {
+            panel.style.removeProperty('--stm-cover-rgb');
+        }
+    };
+    img.onerror = () => { if (token === colorToken) panel.style.removeProperty('--stm-cover-rgb'); };
+    img.src = src;
+}
+
+/** 按设置应用唱片样式（vinyl 黑胶 | color 彩胶 | tape 磁带 | cover 封面）和配色（theme 跟随美化 | cover 封面取色）。 */
+export function applyDiscStyle() {
+    const s = settings();
+    panel.dataset.disc = s.disc;
+    panel.dataset.palette = s.palette;
+}
+
+/** 自定义 CSS：放在页面最后一个 style 元素中，可覆盖本扩展的全部样式。 */
+export function applyCustomCss() {
+    let el = document.getElementById('stm-custom-css');
+    if (!el) { el = document.createElement('style'); el.id = 'stm-custom-css'; document.head.appendChild(el); }
+    el.textContent = settings().customCss || '';
+}
+
 /** 单曲循环图标：循环箭头和中间的 1 画在同一个图形里，粗细一致。 */
 const ONE_SVG = '<svg class="stm-one-svg" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
     + '<path d="M4 11.5V10a3.5 3.5 0 0 1 3.5-3.5H19"/><path d="M16 3.5l3 3-3 3"/>'
@@ -613,7 +801,9 @@ function renderTrack() {
     const t = player.current();
     els.title.textContent = t ? t.title : '未选择歌曲';
     els.artist.textContent = t ? t.artist : '';
-    if (t && t.cover) { els.cover.src = t.cover; } else { els.cover.removeAttribute('src'); els.cover.style.visibility = 'hidden'; }
+    if (t && t.cover) { els.cover.src = t.cover; els.tapeCover.src = t.cover; } else { for (const img of [els.cover, els.tapeCover]) { img.removeAttribute('src'); img.style.visibility = 'hidden'; } }
+    els.tapeTitle.textContent = t ? t.title : '';
+    applyCoverColor(t && t.cover);
     setProgress(0);
     els.cur.textContent = '0:00';
     els.dur.textContent = '0:00';
@@ -623,7 +813,7 @@ function renderTrack() {
     els.capArtist.textContent = t ? ` - ${t.artist}` : '';
     if (t && t.cover) els.capCover.src = t.cover; else { els.capCover.removeAttribute('src'); els.capCover.style.visibility = 'hidden'; }
     if (settings().fabIcon.type === 'cover') renderFab();
-    if (sheetKind === 'queue') renderQueue();
+    if (sheetKind === 'queue') markQueueCurrent();
 }
 
 const MODE = {
@@ -758,14 +948,14 @@ function buildSearch() {
     const form = h('form', 'stm-search');
     els.input = h('input', 'stm-input');
     els.input.type = 'search';
-    els.input.placeholder = '歌名或歌手';
+    els.input.placeholder = '歌名、歌手，或单曲链接、音频直链';
     els.input.enterKeyHint = 'search';
     const submit = iconButton('fa-magnifying-glass', '搜索');
     submit.type = 'submit';
     form.append(els.input, submit);
     form.addEventListener('submit', (e) => { e.preventDefault(); runSearch(); });
     els.results = h('div', 'stm-list');
-    hint(els.results, '输入歌名或歌手后搜索');
+    hint(els.results, '输入歌名或歌手后搜索。也可粘贴网易云单曲链接或音频文件地址。');
     sec.append(form, els.results);
     return sec;
 }
@@ -777,7 +967,19 @@ async function runSearch() {
     hint(els.results, '搜索中');
     let list;
     try {
-        list = await searchSongs(keyword);
+        // 单曲链接或音频直链：直接列出这一首
+        const link = library.parseSongLink(keyword);
+        if (link) {
+            let track = null;
+            if (link.direct) track = library.directTrack(link.direct);
+            else {
+                const id = link.song || await library.resolveSongShort(link.songShort).catch(() => null);
+                if (id) track = await getSong(id);
+            }
+            if (token !== searchToken) return;
+            if (!track) { hint(els.results, link.songShort ? '无法从该链接中读取歌曲。请粘贴歌曲页面的完整地址。' : '无法读取该歌曲'); return; }
+            list = [track];
+        } else list = await searchSongs(keyword);
     } catch (e) {
         if (token !== searchToken) return;
         hint(els.results, e && e.message === 'no provider' ? '未启用任何接口，请在设置中开启' : '搜索失败，接口暂时不可用');
@@ -825,13 +1027,14 @@ function buildSheet() {
         },
     });
     els.sheetBody = h('div', 'stm-list');
-    els.sheet.append(head, els.sheetBody);
+    els.sheet.append(head, els.sheetBody, buildSelectBar());
     return [els.scrim, els.sheet];
 }
 
 /** 打开弹出层。fill(body) 负责填内容；action 是标题右侧的按钮（可省略）。 */
 export function openSheet(kind, title, fill, action) {
     sheetKind = kind;
+    if (kind !== 'queue') { selecting = false; selected.clear(); els.sheet.classList.remove('stm-selecting'); }
     els.sheetTitle.textContent = title;
     els.sheetAction.replaceChildren();
     if (action) els.sheetAction.appendChild(action);
@@ -845,27 +1048,257 @@ export function closeSheet() {
     if (panel) panel.classList.remove('stm-sheet-open');
 }
 
-function renderQueue() {
+// ---------- 播放列表 ----------
+
+/** 「不喜欢」图标：爱心加一条斜线。FontAwesome 中没有此图标，用内联 SVG 绘制，颜色跟随文字颜色。 */
+const DISLIKE_SVG = '<svg class="stm-dislike-svg" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    + '<path d="M12 20.2l-7.1-7.1a4.6 4.6 0 0 1 6.5-6.5l.6.6.6-.6a4.6 4.6 0 0 1 6.5 6.5L12 20.2z"/>'
+    + '<path d="M3.5 3.5l17 17"/></svg>';
+
+const QUEUE_ANIM_ROWS = 12;    // 打开播放列表时只有前若干行播放依次进入的动画，其余行直接显示
+let queueKeys = [];            // 上一次渲染时各行的标识，用于区分保留的行和新加入的行
+let selecting = false;         // 多选状态
+const selected = new Set();    // 多选时选中的行标识
+
+/** 每一行的标识：歌曲 key；同一首歌出现多次时加序号区分。 */
+function rowIds(q) {
+    const count = new Map();
+    return q.map((t) => { const n = count.get(t.key) || 0; count.set(t.key, n + 1); return n ? `${t.key}#${n}` : t.key; });
+}
+
+/** 行移出：先播放退出动画，再执行 done。 */
+function rowOut(row, done) {
+    if (!canSlide()) { done(); return; }
+    row.style.pointerEvents = 'none';
+    const a = row.animate([{ transform: 'none', opacity: 1 }, { transform: 'translateX(24%)', opacity: 0 }], { duration: 200, easing: 'cubic-bezier(0.4, 0, 1, 1)', fill: 'forwards' });
+    a.finished.then(done, done);
+}
+
+function queueRow(track, i, id) {
+    const dislike = h('button', 'stm-btn stm-press stm-dislike');
+    dislike.type = 'button';
+    dislike.title = '不喜欢';
+    dislike.setAttribute('aria-label', '不喜欢');
+    dislike.insertAdjacentHTML('beforeend', DISLIKE_SVG);
+    const del = iconButton('fa-trash-can', '移出播放列表');
+    const { row, main } = songRow(track, i, [dislike, del]);
+    row.classList.add('stm-qrow');
+    row.dataset.i = String(i);
+    row.dataset.id = id;
+    const check = h('span', 'stm-check');
+    check.appendChild(h('i', 'fa-solid fa-check'));
+    row.prepend(check);
+    row.classList.toggle('stm-current', i === player.index());
+    row.classList.toggle('stm-rec', !!track.rec);
+    row.classList.toggle('stm-picked', selected.has(id));
+    const at = () => Number(row.dataset.i);
+    dislike.addEventListener('click', () => rowOut(row, () => {
+        rec.blockTrack(track);
+        player.removeAt(at());
+        notify(`已加入黑名单：${track.title}`);
+        refreshBlockList();
+    }));
+    del.addEventListener('click', () => rowOut(row, () => player.removeAt(at())));
+    const pick = () => {
+        if (selected.has(id)) selected.delete(id); else selected.add(id);
+        row.classList.toggle('stm-picked', selected.has(id));
+        renderSelectBar();
+    };
+    main.addEventListener('click', () => { if (selecting) pick(); else player.playIndex(at()); });
+    check.addEventListener('click', pick);
+    return row;
+}
+
+/**
+ * 渲染播放列表。
+ * 首次打开时前若干行依次进入；之后列表内容变化时，保留的行不再播放进入动画，
+ * 位置变化的行从原位置移动到新位置，只有新加入的行播放进入动画。
+ */
+const QUEUE_FIRST = 30;        // 打开时先生成的行数；其余行分批补上
+const QUEUE_CHUNK = 40;
+let queueLimit = 0;            // 当前已生成的行数上限
+let queueFillTimer = 0;
+
+function renderQueue(fresh = false) {
     const q = player.queue();
-    els.sheetTitle.textContent = q.length ? `播放列表（${q.length}）` : '播放列表';
-    if (!q.length) { hint(els.sheetBody, '播放列表为空'); return; }
-    els.sheetBody.replaceChildren();
-    q.forEach((track, i) => {
-        const del = iconButton('fa-trash-can', '移出播放列表');
-        del.addEventListener('click', () => player.removeAt(i));
-        const { row, main } = songRow(track, i, [addToButton(track), del]);
-        row.classList.toggle('stm-current', i === player.index());
-        row.classList.toggle('stm-rec', !!track.rec);
-        main.addEventListener('click', () => player.playIndex(i));
-        els.sheetBody.appendChild(row);
+    const body = els.sheetBody;
+    if (fresh) { queueKeys = []; queueLimit = 0; clearTimeout(queueFillTimer); }
+    if (!q.length) {
+        queueKeys = [];
+        clearTimeout(queueFillTimer);
+        if (selecting) setSelecting(false);
+        renderQueueTitle();
+        hint(body, '播放列表为空');
+        return;
+    }
+    const ids = rowIds(q);
+    const existing = new Map([...body.querySelectorAll('.stm-qrow')].map((r) => [r.dataset.id, r]));
+    const first = !existing.size;
+    if (first) { body.replaceChildren(); queueLimit = QUEUE_FIRST; }
+    const animate = !first && canSlide();
+    // 记下保留的行原来的位置，用于移动动画
+    const before = new Map();
+    if (animate) {
+        const top = body.getBoundingClientRect().top;
+        for (const [id, r] of existing) before.set(id, r.getBoundingClientRect().top - top);
+    }
+    const old = new Set(queueKeys);
+    for (const id of [...selected]) if (!ids.includes(id)) selected.delete(id);
+    const limit = Math.min(q.length, Math.max(queueLimit, existing.size));
+    const cur = player.index();
+    const kept = [];
+    // 先移除已不在列表里的行，其余行保持原有顺序，不移动节点（移动节点会使进入动画重新播放）
+    const keep = new Set(ids.slice(0, limit));
+    for (const [id, r] of existing) if (!keep.has(id)) { r.remove(); existing.delete(id); }
+    for (let i = 0; i < limit; i++) {
+        const id = ids[i];
+        let row = existing.get(id);
+        if (row) {
+            existing.delete(id);
+            // 进入动画已结束的行改为静止；仍在进入中的行让它播完
+            if (!row.getAnimations().some((a) => a instanceof CSSAnimation && a.playState === 'running')) row.classList.add('stm-still');
+            row.classList.toggle('stm-rec', !!q[i].rec);
+            kept.push(row);
+        } else {
+            row = queueRow(q[i], i, id);
+            // 首次打开：前若干行依次进入；之后：已在列表里的歌（之前未生成的行）直接显示，新加入的歌播放进入动画
+            if (first ? i >= QUEUE_ANIM_ROWS : old.has(id)) row.classList.add('stm-still');
+            else if (!first) row.style.setProperty('--i', 0);
+        }
+        row.dataset.i = String(i);
+        row.classList.toggle('stm-current', i === cur);
+        row.classList.toggle('stm-picked', selected.has(id));
+        if (body.children[i] !== row) body.insertBefore(row, body.children[i] || null);
+    }
+    while (body.children.length > limit) body.lastElementChild.remove();
+    queueKeys = ids;
+    renderQueueTitle();
+    renderSelectBar();
+    // 未生成的行分批补上，每批之间让出主线程
+    clearTimeout(queueFillTimer);
+    if (limit < q.length) {
+        queueFillTimer = setTimeout(() => { queueLimit = limit + QUEUE_CHUNK; if (sheetKind === 'queue') renderQueue(); }, first ? 400 : 16);
+    }
+    if (!animate) return;
+    // 保留的行从原位置移动到新位置（只改 transform）；不在可见范围内的行不做动画
+    const top = body.getBoundingClientRect().top;
+    const view = body.clientHeight;
+    for (const row of kept) {
+        const was = before.get(row.dataset.id);
+        const now = row.getBoundingClientRect().top - top;
+        const d = was - now;
+        const hgt = row.offsetHeight;
+        if (Math.abs(d) < 0.5 || (now > view && was > view) || (now + hgt < 0 && was + hgt < 0)) continue;
+        for (const a of row.getAnimations()) if (!(a instanceof CSSAnimation)) a.cancel();
+        spring.animate({ from: d, to: 0, targets: [[row, (p) => ({ transform: `translateY(${p}px)` })]] }).finished.then(() => {});
+    }
+}
+
+function renderQueueTitle() {
+    const n = player.queue().length;
+    if (selecting) els.sheetTitle.textContent = `已选择 ${selected.size} 首`;
+    else els.sheetTitle.textContent = n ? `播放列表（${n}）` : '播放列表';
+}
+
+/** 切歌时只移动「当前播放」的高亮，不重建列表。 */
+function markQueueCurrent() {
+    const i = player.index();
+    for (const row of els.sheetBody.querySelectorAll('.stm-qrow')) row.classList.toggle('stm-current', Number(row.dataset.i) === i);
+}
+
+function renderQueueActions() {
+    const box = h('div', 'stm-sheet-btns');
+    if (selecting) {
+        const all = h('button', 'stm-text-btn stm-press', '全选');
+        all.type = 'button';
+        const allOn = () => queueKeys.length > 0 && selected.size === queueKeys.length;
+        all.textContent = allOn() ? '取消全选' : '全选';
+        all.addEventListener('click', () => {
+            if (allOn()) selected.clear(); else queueKeys.forEach((id) => selected.add(id));
+            for (const row of els.sheetBody.querySelectorAll('.stm-qrow')) row.classList.toggle('stm-picked', selected.has(row.dataset.id));
+            renderSelectBar();
+        });
+        els.selAll = all;
+        const done = iconButton('fa-check', '完成');
+        done.addEventListener('click', () => setSelecting(false));
+        box.append(all, done);
+    } else {
+        const multi = iconButton('fa-list-check', '多选');
+        multi.addEventListener('click', () => { if (player.queue().length) setSelecting(true); });
+        els.refresh = iconButton(rec.isBusy() ? 'fa-spinner fa-spin' : 'fa-dice', '重新推荐');
+        els.refresh.addEventListener('click', () => rec.refresh());
+        box.append(multi, els.refresh);
+    }
+    els.sheetAction.replaceChildren(box);
+}
+
+function setSelecting(on) {
+    // 退出多选时操作栏先下降淡出，再从布局中移除
+    if (!on && selecting && canSlide() && els.selBar) {
+        const bar = els.selBar;
+        bar.classList.add('stm-sel-leaving');
+        const a = bar.animate([{ transform: 'none', opacity: 1 }, { transform: 'translateY(100%)', opacity: 0 }], { duration: 200, easing: 'cubic-bezier(0.4, 0, 1, 1)', fill: 'forwards' });
+        const done = () => { bar.classList.remove('stm-sel-leaving'); a.cancel(); };
+        a.finished.then(done, done);
+    }
+    selecting = on;
+    selected.clear();
+    els.sheet.classList.toggle('stm-selecting', on);
+    for (const row of els.sheetBody.querySelectorAll('.stm-qrow')) row.classList.remove('stm-picked');
+    renderQueueActions();
+    renderQueueTitle();
+    renderSelectBar();
+}
+
+/** 多选时底部的操作栏：加入歌单、从列表删除。 */
+function renderSelectBar() {
+    if (!els.selBar) return;
+    const n = selected.size;
+    els.selAdd.disabled = !n;
+    els.selDel.disabled = !n;
+    if (els.selAll) els.selAll.textContent = queueKeys.length > 0 && n === queueKeys.length ? '取消全选' : '全选';
+    if (selecting) renderQueueTitle();
+}
+
+function buildSelectBar() {
+    const bar = h('div', 'stm-sel-bar');
+    const mk = (icon, label) => {
+        const b = h('button', 'stm-sel-btn stm-press');
+        b.type = 'button';
+        b.append(h('i', `fa-solid ${icon}`), h('span', '', label));
+        return b;
+    };
+    els.selAdd = mk('fa-folder-plus', '加入歌单');
+    els.selDel = mk('fa-trash-can', '从列表删除');
+    const pickedIndices = () => queueKeys.map((id, i) => (selected.has(id) ? i : -1)).filter((i) => i >= 0);
+    els.selAdd.addEventListener('click', () => {
+        const q = player.queue();
+        const tracks = pickedIndices().map((i) => q[i]);
+        if (!tracks.length) return;
+        setSelecting(false);
+        openAddTo(tracks);
     });
+    els.selDel.addEventListener('click', () => {
+        const idx = pickedIndices();
+        if (!idx.length) return;
+        const rows = [...els.sheetBody.querySelectorAll('.stm-qrow')].filter((r) => selected.has(r.dataset.id));
+        let left = rows.length;
+        const finish = () => { if (--left > 0) return; setSelecting(false); player.removeMany(idx); };
+        rows.forEach((r) => rowOut(r, finish));
+        if (!rows.length) { setSelecting(false); player.removeMany(idx); }
+    });
+    bar.append(els.selAdd, els.selDel);
+    els.selBar = bar;
+    return bar;
 }
 
 function openQueue() {
-    els.refresh = iconButton('fa-dice', '按剧情重新推荐');
-    els.refresh.addEventListener('click', () => rec.refresh());
-    openSheet('queue', '播放列表', () => {}, els.refresh);
-    renderQueue();
+    selecting = false;
+    selected.clear();
+    els.sheet.classList.remove('stm-selecting');
+    openSheet('queue', '播放列表', () => {});
+    renderQueueActions();
+    renderQueue(true);
 }
 
 function menuRow(icon, label, fn, i) {
@@ -896,27 +1329,55 @@ function renderPick() {
             list.appendChild(row);
         });
     }
-    box.append(bar, list, h('div', 'stm-set-desc stm-pick-note', '「重新推荐」使用同一组标签检索另一批歌曲，不调用模型。相关设置位于「设置」中的「按剧情选歌」。'));
+    box.append(bar, list, sceneBar(), h('div', 'stm-set-desc stm-pick-note', '「重新推荐」使用同一组标签检索另一批歌曲，不调用模型。情境：选中后，其说明从下一次推荐起附加给模型，其检索词在下一次检索（包括「重新推荐」）时附加；再点一次取消。相关设置位于「设置」中的「剧情配乐」。'));
 }
 
-/** 选择要加入的歌单。 */
-export function openAddTo(track) {
-    openSheet('addto', '加入歌单', (body) => {
+/** 选歌页的情境按钮：单选，再点一次取消。按钮内容在设置中编辑。 */
+function sceneBar() {
+    const r = settings().rec;
+    const wrap = h('div', 'stm-scenes');
+    wrap.appendChild(h('div', 'stm-sec-title', '情境'));
+    const chips = h('div', 'stm-chips');
+    const render = () => {
+        chips.replaceChildren();
+        for (const sc of r.scenes) {
+            const b = h('button', 'stm-chip stm-press', sc.name);
+            b.type = 'button';
+            b.classList.toggle('stm-on', r.scene === sc.name);
+            b.title = sc.prompt;
+            b.addEventListener('click', () => {
+                r.scene = r.scene === sc.name ? '' : sc.name;
+                save();
+                for (const x of chips.children) x.classList.toggle('stm-on', x.textContent === r.scene);
+            });
+            chips.appendChild(b);
+        }
+        if (!r.scenes.length) chips.appendChild(h('div', 'stm-set-desc', '尚无情境。可在设置中添加。'));
+    };
+    render();
+    wrap.appendChild(chips);
+    return wrap;
+}
+
+/** 选择要加入的歌单。tracks 为一首歌或一组歌。 */
+export function openAddTo(tracks) {
+    const list0 = Array.isArray(tracks) ? tracks : [tracks];
+    const many = list0.length > 1;
+    const done = (list, n) => {
+        closeSheet();
+        if (many) notify(n ? `已将 ${n} 首加入歌单：${list.name}` : '所选歌曲均已在歌单中');
+        else notify(n ? `已加入歌单：${list.name}` : '该歌曲已在歌单中');
+    };
+    openSheet('addto', many ? `加入歌单（${list0.length} 首）` : '加入歌单', (body) => {
         const lists = library.lib().lists;
         body.appendChild(menuRow('fa-plus', '新建歌单', async () => {
             const name = await my.askName('歌单名称');
             if (!name) return;
             const list = library.createList(name);
-            library.addToList(list.id, [track]);
-            closeSheet();
-            notify(`已加入歌单：${list.name}`);
+            done(list, library.addToList(list.id, list0));
         }, 0));
         lists.forEach((list, i) => {
-            body.appendChild(menuRow('fa-music', `${list.name}（${list.keys.length}）`, () => {
-                const n = library.addToList(list.id, [track]);
-                closeSheet();
-                notify(n ? `已加入歌单：${list.name}` : '该歌曲已在歌单中');
-            }, i + 1));
+            body.appendChild(menuRow('fa-music', `${list.name}（${list.keys.length}）`, () => done(list, library.addToList(list.id, list0)), i + 1));
         });
     });
 }

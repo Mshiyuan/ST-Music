@@ -3,18 +3,23 @@
 import { settings, save, notify } from './settings.js';
 import { getLyric, parseLyric } from './sources.js';
 import * as library from './library.js';
+import { BufferPlayer } from './webaudio.js';
 
 const LOAD_TIMEOUT = 12000;
+const BUFFER_LOAD_TIMEOUT = 40000;   // 音频线程方式需下载整首后再解码，等待时间放宽
 const MAX_SKIPS = 5;
 
-const audio = new Audio();
+// 播放元素：标准方式为 HTMLAudioElement；「音频线程」方式为 BufferPlayer（见 webaudio.js），接口相同
+let audio = new Audio();
 audio.preload = 'auto';
+const isBuffer = () => audio instanceof BufferPlayer;
+let plannedIndex = -1;         // 音频线程方式下已安排好的下一首在列表中的位置
 
 const listeners = {};
 const badKeys = new Set();     // 本次会话里确认不能播的歌
 let loadToken = 0;
 let skips = 0;
-let pendingNext = null;        // 当前这首播完后要切到的歌（按剧情推荐的第一首）
+let pendingNext = null;        // 当前这首播完后要切到的歌（剧情配乐推荐的第一首）
 let userPaused = false;        // 用户主动暂停后，自动推荐不擅自开始播放
 let started = false;           // 本次会话里是否已经开始过播放
 let lastTime = 0;              // 上一次进度回报时的播放位置，用来累计收听时长
@@ -79,7 +84,7 @@ function attempt(el, url, play) {
         };
         const onOk = () => { if (play) trace('可以播放'); finish(true); };
         const onBad = () => { if (play) trace('加载出错'); finish(false); };
-        const timer = setTimeout(() => { if (play) trace('加载超时'); finish(false); }, LOAD_TIMEOUT);
+        const timer = setTimeout(() => { if (play) trace('加载超时'); finish(false); }, el instanceof BufferPlayer ? BUFFER_LOAD_TIMEOUT : LOAD_TIMEOUT);
         el.addEventListener('canplay', onOk);
         el.addEventListener('error', onBad);
         el.src = url;
@@ -105,14 +110,20 @@ async function startTrack(track, token) {
     const main = attempt(audio, urls[0], true);
     let spare = null, spareResult = null;
     // 页面在后台时不新建播放元素：后台新建的元素可能被浏览器拦截
-    if (urls[1] && !document.hidden) {
+    if (urls[1] && !document.hidden && !isBuffer()) {
         spare = new Audio();
         spare.preload = 'auto';
         spareResult = attempt(spare, urls[1], false);
     }
     if (await main) { release(spare); return token === loadToken; }
     if (token !== loadToken) { release(spare); return false; }
-    if (!spare) return false;
+    if (!spare) {
+        // 音频线程方式不预热第二个地址；第一个失败时直接在同一个播放元素上换第二个
+        if (!urls[1] || !isBuffer()) return false;
+        const ok2 = await attempt(audio, urls[1], true);
+        if (ok2) track.urls = [urls[1], urls[0], ...urls.slice(2)];
+        return ok2 && token === loadToken;
+    }
     const spareOk = await spareResult;
     release(spare);
     if (!spareOk || token !== loadToken) return false;
@@ -140,6 +151,28 @@ function prefetchNext() {
     if (!next) return;
     getLyric(next).catch(() => {});
     if (next.cover) { const img = new Image(); img.src = next.cover; }
+}
+
+/**
+ * 音频线程方式：确定下一首并交给播放元素预先安排，使当前这首结束时在音频线程上直接接上，不需要脚本参与。
+ * 下一首的选择与「播完后切换」相同：先看剧情配乐等待切换的歌，再按播放模式。单曲循环时不安排。
+ */
+function planNext() {
+    if (!isBuffer()) return;
+    const q = queue();
+    const s = settings();
+    plannedIndex = -1;
+    if (!current() || (s.mode === 'single' && !pendingNext) || q.length < 2) { audio.setNext(null); return; }
+    let j = -1;
+    if (pendingNext) j = q.findIndex((t) => t.key === pendingNext);
+    if (j < 0 && s.mode === 'shuffle') { do j = Math.floor(Math.random() * q.length); while (j === s.index); }
+    if (j < 0) j = (s.index + 1) % q.length;
+    const t = q[j];
+    const url = (t.urls || []).find(Boolean);
+    if (!t || badKeys.has(t.key) || !url) { audio.setNext(null); return; }
+    plannedIndex = j;
+    audio.setNext(url, t.key);
+    getLyric(t).catch(() => {});
 }
 
 export async function playIndex(i, autoplay = true) {
@@ -185,6 +218,7 @@ export async function playIndex(i, autoplay = true) {
     skips = 0;
     if (audio.paused) audio.play().catch(() => {});   // 被浏览器拦截时停在暂停状态，等用户点播放
     prefetchNext();
+    planNext();
 }
 
 export function toggle() {
@@ -205,6 +239,13 @@ export function pause() {
 
 function stepIndex(dir) {
     const q = queue();
+    // 音频线程方式下已安排好的下一首：手动「下一首」也切到它，与自动接续一致
+    if (dir > 0 && plannedIndex >= 0 && plannedIndex < q.length) {
+        const p = plannedIndex;
+        plannedIndex = -1;
+        if (pendingNext === q[p].key) pendingNext = null;
+        return p;
+    }
     if (dir > 0 && pendingNext) {
         const p = q.findIndex((t) => t.key === pendingNext);
         pendingNext = null;
@@ -258,11 +299,12 @@ export function enqueue(track) {
     save();
     emit('queue');
     if (q.length === 1) emit('track');
+    planNext();
     return true;
 }
 
 /**
- * 放入一批按剧情推荐的歌。
+ * 放入一批剧情配乐推荐的歌。
  * 新歌排在当前这首之后；以前推荐的歌保留，超过上限时去掉最早的；手动加入的歌不受影响。
  * immediate 为 true（手动刷新）或设置为「立即切换」时马上播放第一首；否则等当前这首播完再切。
  */
@@ -288,16 +330,28 @@ export function setRecommended(tracks, immediate) {
     } else {
         pendingNext = fresh[0].key;
         syncLoop();
+        planNext();
     }
     return fresh.length;
 }
 
-export function removeAt(i) {
-    const q = queue();
+export const removeAt = (i) => removeMany([i]);
+
+/** 一次移出多首。移出的歌包含正在播放的那首时，接着播放它之后第一首未被移出的歌。 */
+export function removeMany(indices) {
     const s = settings();
-    const wasCurrent = i === s.index;
-    q.splice(i, 1);
-    if (i < s.index) s.index -= 1;
+    const gone = new Set(indices.filter((i) => i >= 0 && i < s.queue.length));
+    if (!gone.size) return;
+    const cur = current();
+    const wasCurrent = gone.has(s.index);
+    let after = null;
+    if (wasCurrent) {
+        const n = s.queue.length;
+        for (let d = 1; d < n && !after; d++) { const j = (s.index + d) % n; if (!gone.has(j)) after = s.queue[j]; }
+    }
+    s.queue = s.queue.filter((_, j) => !gone.has(j));
+    const q = s.queue;
+    if (!wasCurrent) s.index = cur ? q.indexOf(cur) : -1;
     if (!q.length) {
         s.index = -1;
         loadToken++;
@@ -308,15 +362,17 @@ export function removeAt(i) {
         state.hasTrans = false;
     } else if (wasCurrent) {
         const keep = state.playing;
+        s.index = Math.max(0, q.indexOf(after));
         save();
         emit('queue');
-        playIndex(Math.min(i, q.length - 1), keep);
+        playIndex(s.index, keep);
         return;
     }
     save();
     emit('queue');
     emit('track');
     emit('lyric');
+    planNext();
 }
 
 /** 单曲循环交给播放器自带的循环：一曲结束时不需要脚本参与，页面在后台时也能循环。 */
@@ -329,13 +385,36 @@ export function cycleMode() {
     const s = settings();
     s.mode = order[(order.indexOf(s.mode) + 1) % order.length];
     syncLoop();
+    planNext();
     save();
     emit('state');
     return s.mode;
 }
 
+function bindAudio(audio) {
 audio.addEventListener('play', () => { state.playing = true; emit('state'); });
 audio.addEventListener('pause', () => { state.playing = false; emit('state'); });
+// 音频线程方式：当前这首结束时已在音频线程上接上了下一首，这里只更新列表位置和界面，不重新加载
+audio.addEventListener('advance', (e) => {
+    const key = e.detail.key;
+    const q = queue();
+    const s = settings();
+    let i = plannedIndex >= 0 && q[plannedIndex] && q[plannedIndex].key === key ? plannedIndex : q.findIndex((t) => t.key === key);
+    plannedIndex = -1;
+    if (pendingNext === key) pendingNext = null;
+    if (i < 0) return;
+    s.index = i;
+    save();
+    counted = false;
+    lastTime = 0;
+    trace(`音频线程接续：${q[i].title}`);
+    syncLoop();
+    emit('track');
+    emit('state');
+    loadLyric(q[i]);
+    prefetchNext();
+    planNext();
+});
 audio.addEventListener('timeupdate', () => {
     const t = audio.currentTime;
     const delta = t - lastTime;
@@ -352,14 +431,51 @@ audio.addEventListener('durationchange', () => emit('time'));
 audio.addEventListener('stalled', () => trace('数据中断'));
 audio.addEventListener('waiting', () => trace('等待缓冲'));
 audio.addEventListener('playing', () => trace('开始出声'));
-document.addEventListener('visibilitychange', () => trace(document.hidden ? '页面转入后台' : '页面回到前台'));
 audio.addEventListener('ended', () => {
     trace('一曲结束');
     if (settings().mode === 'single' && !pendingNext) { audio.currentTime = 0; audio.play().catch(() => {}); return; }
     next();
 });
+}
+bindAudio(audio);
+document.addEventListener('visibilitychange', () => trace(document.hidden ? '页面转入后台' : '页面回到前台'));
+
+/**
+ * 切换播放方式：'element' 标准（HTMLAudioElement）| 'buffer' 音频线程（Web Audio）。
+ * 切换时停止当前播放，保留播放位置，不自动开始播放。
+ */
+export function setEngine(kind) {
+    const want = kind === 'buffer';
+    if (want === isBuffer()) return;
+    const pos = audio.currentTime || 0;
+    const wasStarted = started;
+    loadToken++;
+    audio.pause();
+    if (isBuffer()) { audio.src = ''; } else { audio.removeAttribute('src'); audio.load(); }
+    audio = want ? new BufferPlayer() : new Audio();
+    if (!want) audio.preload = 'auto';
+    bindAudio(audio);
+    audio.volume = settings().volume;
+    plannedIndex = -1;
+    syncLoop();
+    state.playing = false;
+    started = false;
+    emit('state');
+    const t = current();
+    // 本次会话还没播放过时不预先下载（音频线程方式会下载整首）
+    if (t && wasStarted) {
+        const urls = (t.urls || []).filter(Boolean);
+        if (urls[0]) {
+            audio.src = urls[0];
+            audio.load();
+            if (pos) { const go = () => { audio.currentTime = pos; audio.removeEventListener('canplay', go); }; audio.addEventListener('canplay', go); }
+        }
+    }
+    trace(want ? '播放方式：音频线程' : '播放方式：标准');
+}
 
 export function init() {
+    if (settings().engine === 'buffer') setEngine('buffer');
     audio.volume = settings().volume;
     syncLoop();
     const t = current();

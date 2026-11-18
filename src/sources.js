@@ -54,6 +54,9 @@ function metingProvider(name, base) {
         async playlist(id) {
             return toTracks(await request(`${base}${sep}server=netease&type=playlist&id=${encodeURIComponent(id)}`));
         },
+        async song(id) {
+            return toTracks(await request(`${base}${sep}server=netease&type=song&id=${encodeURIComponent(id)}`));
+        },
     };
 }
 
@@ -134,6 +137,60 @@ export async function searchSongs(keyword) {
 /** 读取网易云歌单里的歌曲。只发送歌单编号。 */
 export async function getPlaylist(id) {
     return (await withProviders((p) => p.playlist, (p) => p.playlist(id))) || [];
+}
+
+const playlistSearchCache = new Map();
+
+/**
+ * 按关键词搜索网易云歌单（经酒馆服务器的网页访问接口；网易云接口不允许浏览器跨域读取）。
+ * 只发送关键词。返回 [{ id, name, count }]。
+ */
+export async function searchPlaylists(keyword, limit = 8) {
+    const k = keyword.trim();
+    if (!k) return [];
+    const hit = playlistSearchCache.get(k);
+    if (hit && Date.now() - hit.at < SEARCH_TTL) return hit.list;
+    const c = globalThis.SillyTavern.getContext();
+    const url = `https://music.163.com/api/cloudsearch/pc?s=${encodeURIComponent(k)}&type=1000&limit=${limit}&offset=0`;
+    const res = await fetch('/api/search/visit', { method: 'POST', headers: c.getRequestHeaders(), body: JSON.stringify({ url, html: false }) });
+    if (!res.ok) throw new Error('visit ' + res.status);
+    const j = JSON.parse(await res.text());
+    const list = ((j.result && j.result.playlists) || []).map((p) => ({ id: String(p.id), name: p.name || '', count: p.trackCount || 0 }));
+    playlistSearchCache.set(k, { at: Date.now(), list });
+    return list;
+}
+
+/** 按编号读取一首网易云歌曲。 */
+export async function getSong(id) {
+    const list = (await withProviders((p) => p.song, (p) => p.song(id))) || [];
+    return list[0] || null;
+}
+
+/**
+ * 经酒馆服务器读取 QQ 音乐歌单（QQ 音乐接口不允许浏览器跨域读取）。
+ * 只发送歌单编号，不发送创建者编号（hosteuin），也不读取创建者信息。
+ * 返回 { title, songs: [{ title, artist }] }。
+ */
+export async function getQQPlaylist(id, onProgress) {
+    const c = globalThis.SillyTavern.getContext();
+    const songs = [];
+    let title = '', total = Infinity;
+    for (let begin = 0; begin < total && begin < 2000; begin += 200) {
+        const body = { comm: { ct: 24, cv: 4747474 }, req_0: { module: 'music.srfDissInfo.aiDissInfo', method: 'uniform_get_Dissinfo', param: { disstid: Number(id), tag: 1, userinfo: 0, orderlist: 1, song_begin: begin, song_num: 200 } } };
+        const url = 'https://u.y.qq.com/cgi-bin/musicu.fcg?data=' + encodeURIComponent(JSON.stringify(body));
+        const res = await fetch('/api/search/visit', { method: 'POST', headers: c.getRequestHeaders(), body: JSON.stringify({ url, html: false }) });
+        if (!res.ok) throw new Error('visit ' + res.status);
+        const j = JSON.parse(await res.text());
+        const d = j && j.req_0 && j.req_0.data;
+        if (!d || j.req_0.code !== 0) throw new Error('empty');
+        title = (d.dirinfo && d.dirinfo.title) || title;
+        total = d.total_song_num || 0;
+        const list = d.songlist || [];
+        for (const s of list) songs.push({ title: s.name || s.title || '', artist: (s.singer || []).map((x) => x.name).join('/') });
+        if (onProgress) onProgress(songs.length, total);
+        if (!list.length) break;
+    }
+    return { title, songs };
 }
 
 const timed = (text) => /\[\d+:\d+/.test(text || '');
@@ -218,15 +275,24 @@ export function canLoad(url, timeout = 8000) {
     });
 }
 
-/** 依次探测一首歌的各个地址；能播时把可用地址排到最前并返回 true。 */
-export async function probeTrack(track) {
-    for (const url of (track.urls || []).filter(Boolean)) {
-        if (await canLoad(url)) {
-            track.urls = [url, ...track.urls.filter((u) => u && u !== url)];
-            return true;
+/** 同时探测一首歌的各个地址，任一个能播即返回 true，并把它排到最前。 */
+export function probeTrack(track) {
+    const urls = (track.urls || []).filter(Boolean);
+    if (!urls.length) return Promise.resolve(false);
+    return new Promise((resolve) => {
+        let left = urls.length, done = false;
+        for (const url of urls) {
+            canLoad(url).then((ok) => {
+                left -= 1;
+                if (done) return;
+                if (ok) {
+                    done = true;
+                    track.urls = [url, ...urls.filter((u) => u !== url)];
+                    resolve(true);
+                } else if (!left) resolve(false);
+            });
         }
-    }
-    return false;
+    });
 }
 
 /** 提前与接口和音频服务器建立连接，缩短首次请求的等待。 */

@@ -7,6 +7,7 @@ import * as ui from './ui.js';
 import * as strip from './strip.js';
 import { syncKeepAlive } from './media.js';
 import * as player from './player.js';
+import * as spring from './spring.js';
 
 /** 一行：左边标题和说明，右边控件。 */
 function item(title, desc, control) {
@@ -63,6 +64,9 @@ function onLongPress(el, fn) {
     el.addEventListener('pointerup', cancel);
     el.addEventListener('pointercancel', cancel);
     el.addEventListener('contextmenu', (e) => e.preventDefault());
+    // 手机长按约 0.5 秒会开始选中文字，与长按判定冲突；在按钮上禁止选字，已出现的选区立即清除
+    el.addEventListener('selectstart', (e) => e.preventDefault());
+    el.addEventListener('pointerdown', () => { const sel = window.getSelection(); if (sel && !sel.isCollapsed) sel.removeAllRanges(); });
     el.addEventListener('click', (e) => { if (fired) { e.stopImmediatePropagation(); e.preventDefault(); fired = false; } }, true);
 }
 
@@ -113,6 +117,25 @@ function textButton(label, onClick) {
     b.type = 'button';
     b.addEventListener('click', onClick);
     return b;
+}
+
+/** 把图片缩小到不超过 maxW 像素宽，转为 JPEG 数据地址，避免设置文件过大。 */
+function shrinkImage(file, maxW, quality) {
+    return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => {
+            const scale = Math.min(1, maxW / img.naturalWidth);
+            const c = document.createElement('canvas');
+            c.width = Math.round(img.naturalWidth * scale);
+            c.height = Math.round(img.naturalHeight * scale);
+            c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+            URL.revokeObjectURL(url);
+            resolve(c.toDataURL('image/jpeg', quality));
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('image')); };
+        img.src = url;
+    });
 }
 
 /** 弹出输入框，返回输入的文字；取消时返回空字符串。 */
@@ -198,7 +221,7 @@ function languageChips(r) {
 
 /** 设置的分类：键、名称、图标、填充函数。 */
 const CATS = [
-    ['rec', '按剧情选歌', 'fa-clapperboard', fillRec],
+    ['rec', '剧情配乐', 'fa-clapperboard', fillRec],
     ['look', '外观', 'fa-palette', fillLook],
     ['play', '播放', 'fa-circle-play', fillPlay],
     ['api', '接口', 'fa-plug', fillApi],
@@ -255,12 +278,57 @@ export function build(content, mode = 'sections') {
     }
 }
 
-/** 面板内的设置：首页（启用 + 分类列表）与分类页。 */
+/**
+ * 面板内的设置：首页（启用 + 分类列表）与分类页。
+ * 进入分类页时首页整页向左移出、分类页从右侧进入，两页同步移动；返回时相反。
+ * 移动使用与主页面相同的弹簧；分类页上向右拖动可以返回，规则与主页面左右滑动相同。
+ */
 function buildPages(content) {
     content.classList.add('stm-set-pages');
     content.classList.remove('stm-set-in');
     const root = h('div', 'stm-set-pane stm-set-root');
     const sub = h('div', 'stm-set-pane stm-set-sub');
+    let run = null;   // 正在进行的移动
+    const clear = () => {
+        for (const p of [root, sub]) { p.classList.remove('stm-set-moving', 'stm-dragging', 'stm-peek'); p.style.transform = ''; }
+    };
+    /** 移到首页（inSub 为 false）或分类页；q0 为分类页当前的位移，v0 为初速度（像素每秒）。 */
+    const move = (inSub, q0, v0 = 0) => {
+        if (run) { run.ctl.cancel(); run = null; }
+        content.classList.toggle('stm-set-in', inSub);
+        clear();
+        if (!ui.canSlide()) return;
+        const W = content.clientWidth;
+        root.classList.add('stm-set-moving');
+        sub.classList.add('stm-set-moving');
+        const ctl = spring.animate({
+            from: q0, to: inSub ? 0 : W, v0, rest: 0.4,
+            targets: [[sub, (p) => ({ transform: `translateX(${p}px)` })], [root, (p) => ({ transform: `translateX(${p - W}px)` })]],
+        });
+        const me = { ctl };
+        run = me;
+        ctl.finished.then((done) => { if (done && run === me) { run = null; ctl.cancel(); clear(); } });
+    };
+    const subX = () => (run ? run.ctl.value() : content.classList.contains('stm-set-in') ? 0 : content.clientWidth);
+    content._stmBack = () => move(false, subX());
+    // 设置页每次显示都会重建内容；先解除上一次的拖动绑定
+    if (content._stmUnbind) content._stmUnbind();
+    content._stmUnbind = ui.bindPager(content, {
+        canStart: (e) => ui.canSlide() && (content.classList.contains('stm-set-in') || !!run)
+            && !e.target.closest('input, textarea, select, .stm-seg, .stm-range, .stm-stepper, .stm-chips.stm-editing'),
+        neighbor: (dir) => (dir === -1 ? root : null),
+        current: () => { if (run) { run.ctl.cancel(); run = null; clear(); } return sub; },
+        caught: () => {
+            if (!run) return null;
+            const x = run.ctl.value();
+            run.ctl.cancel();
+            run = null;
+            clear();
+            return { cur: sub, side: root, sideDir: -1, x };
+        },
+        commit: (dir, x, v) => move(dir !== -1, x, v),
+        settle: (cur, side, sideDir, x, v) => move(true, x, v),
+    });
     enableCard(root);
     const list = cardIn(root)();
     list.classList.add('stm-cat-list');
@@ -282,7 +350,7 @@ function buildPages(content) {
             fill(body);
             sub.append(bar, body);
             sub.scrollTop = 0;
-            content.classList.add('stm-set-in');
+            move(true, subX());
         });
         list.appendChild(row);
     }
@@ -293,7 +361,7 @@ function buildPages(content) {
 export function settingsBack() {
     const pages = document.querySelector('#stm-panel .stm-set-pages.stm-set-in');
     if (!pages) return false;
-    pages.classList.remove('stm-set-in');
+    if (pages._stmBack) pages._stmBack(); else pages.classList.remove('stm-set-in');
     return true;
 }
 
@@ -310,22 +378,109 @@ function fillRec(target) {
     tpl.value = r.prompt.trim() ? r.prompt : rec.DEFAULT_PROMPT;
     tpl.rows = 9;
     tpl.addEventListener('input', () => { r.prompt = tpl.value.trim() === rec.DEFAULT_PROMPT.trim() ? '' : tpl.value; save(); });
+    subhead(target, '开关与频率');
     card(
         item('自动选歌', '在提示词中加入一段说明，要求模型在回复末尾输出隐藏标签，并按标签检索歌曲。该条回复的输出增加数十字；不产生额外的模型调用。', toggle(r.enabled, (v) => { r.enabled = v; save(); rec.syncPrompt(); })),
         item('推荐间隔', '每隔若干条模型回复推荐一次。仅在推荐的那一条回复中加入说明。', stepper(r.every, 1, 20, (v) => { r.every = v; save(); })),
         item('每次推荐数量', '推荐的歌曲排在当前歌曲之后。', stepper(r.count, 1, 10, (v) => { r.count = v; save(); })),
+    );
+    subhead(target, '找歌');
+    cardIn(target)(
+        block('找歌方式', '单曲搜索：按搜索短语搜索单曲，结果按平台的匹配度和热度排序，热门歌曲较多。歌单检索：按搜索短语搜索歌单，从前几个歌单中随机取歌，冷门歌曲比例更高；经酒馆服务器请求网易云，只发送短语。向量匹配：在歌单检索的结果中按与标签的相似度排序，需要向量库；未安装向量库时按歌单检索处理。',
+            makeSeg([{ value: 'song', label: '单曲搜索' }, { value: 'playlist', label: '歌单检索' }, { value: 'vector', label: '向量匹配' }], r.method, (v) => { r.method = v; save(); })),
+        item('从我的歌单推荐', '在说明中附上收藏和歌单里随机选取的歌曲，由模型从中选择符合剧情的歌，排在其余推荐之前。该条回复的输入增加约每首十余字。', toggle(r.fromLib.on, (v) => { r.fromLib.on = v; save(); })),
+        item('附上的歌曲数量', '每次推荐时附上的歌曲上限。', stepper(r.fromLib.max, 10, 200, (v) => { r.fromLib.max = v; save(); }, 10)),
+    );
+    subhead(target, '情境');
+    cardIn(target)(sceneEditor(r));
+    subhead(target, '剧情原声');
+    cardIn(target)(
+        item('记录剧情原声', '剧情配乐推荐、且播放超过 30 秒（或一半）的歌曲，按当前角色记录，显示在「我的」中。群聊不记录。', toggle(r.ost.on, (v) => { r.ost.on = v; save(); })),
+        item('每个角色保留的数量', '超过时移除最早的。', stepper(r.ost.max, 10, 200, (v) => { r.ost.max = v; save(); }, 10)),
+    );
+    subhead(target, '播放列表');
+    cardIn(target)(
         block('新推荐到达时', '「重新推荐」始终立即切换。',
             makeSeg([{ value: 'after', label: '播完当前歌曲后切换' }, { value: 'now', label: '立即切换' }], r.arrive, (v) => { r.arrive = v; save(); })),
         item('保留的推荐数量', '以前推荐的歌曲保留在播放列表中；超过此数量时移除最早推荐的歌曲。手动加入的歌曲不受影响。', stepper(r.keep, 10, 100, (v) => { r.keep = v; save(); }, 10)),
         item('避免重复推荐', '最近推荐过的歌曲不再推荐。', toggle(r.noRepeat, (v) => { r.noRepeat = v; save(); })),
         item('不重复的范围', '按最近推荐的歌曲数量计算。', stepper(r.noRepeatCount, 5, 100, (v) => { r.noRepeatCount = v; save(); }, 5)),
+    );
+    subhead(target, '偏好');
+    cardIn(target)(
         block('语言偏好', '未选择时不限制语言。「其他」可添加自定义语言。长按任一语言后，点击右上角的 × 可将其删除。', languageChips(r)),
         block('推荐偏好', '补充给模型的说明，可留空。', prefer),
         block('排除的版本', '选中的版本不出现在推荐结果中。', chips(rec.VERSIONS.map(([k, name]) => [k, name]), (k) => r.exclude[k], (k, on) => { r.exclude[k] = on; save(); })),
+    );
+    subhead(target, '标签与说明');
+    cardIn(target)(
         block('标签维度', '停用的维度不写入标签，可减少输出字数。', chips(rec.DIMS, (k) => r.dims[k], (k, on) => { r.dims[k] = on; save(); })),
-        block('说明模板', '发送给模型的说明文字。{{格式}}、{{维度说明}}、{{语言说明}}、{{偏好说明}} 在发送时替换为实际内容。修改不当可能导致选歌失效。',
+        block('说明模板', '发送给模型的说明文字。{{格式}}、{{维度说明}}、{{语言说明}}、{{偏好说明}}、{{歌单说明}} 在发送时替换为实际内容。修改不当可能导致选歌失效。',
             tpl, textButton('恢复默认', () => { r.prompt = ''; tpl.value = rec.DEFAULT_PROMPT; save(); })),
     );
+    subhead(target, '黑名单');
+    cardIn(target)(blockList());
+}
+
+/** 情境编辑：每个情境有名称、说明（附加给模型）、检索词（附加到搜索短语）。 */
+function sceneEditor(r) {
+    const box = h('div', 'stm-set-block stm-scene-edit');
+    box.appendChild(h('div', 'stm-set-desc', '在「选歌」页点选情境。说明附加给模型；检索词附加到每个搜索短语后。'));
+    const list = h('div', 'stm-scene-list');
+    const render = () => {
+        list.replaceChildren();
+        r.scenes.forEach((sc, i) => {
+            const row = h('div', 'stm-scene-row');
+            const name = textInput(sc.name, '名称', (v) => { if (r.scene === sc.name) r.scene = v.trim(); sc.name = v.trim(); save(); });
+            name.maxLength = 8;
+            const prompt = textInput(sc.prompt, '说明', (v) => { sc.prompt = v; save(); });
+            const words = textInput(sc.words, '检索词（可留空）', (v) => { sc.words = v; save(); });
+            const del = h('button', 'stm-text-btn stm-press', '删除');
+            del.type = 'button';
+            del.addEventListener('click', () => { if (r.scene === sc.name) r.scene = ''; r.scenes.splice(i, 1); save(); render(); });
+            const top = h('div', 'stm-scene-top');
+            top.append(name, del);
+            row.append(top, prompt, words);
+            list.appendChild(row);
+        });
+    };
+    render();
+    const add = textButton('添加情境', () => { r.scenes.push({ name: '新情境', prompt: '', words: '' }); save(); render(); });
+    box.append(list, add);
+    return box;
+}
+
+/** 黑名单：可按歌名或歌手搜索，每行可移出。 */
+function blockList() {
+    const r = settings().rec;
+    const box = h('div', 'stm-set-block stm-block-box');
+    box.appendChild(h('div', 'stm-set-desc', '播放列表中点击「不喜欢」的歌曲记录在此，不再被推荐。'));
+    const input = textInput('', '按歌名或歌手搜索', () => render(), 'search');
+    const list = h('div', 'stm-block-list');
+    const render = () => {
+        const q = input.value.trim().toLowerCase();
+        const items = r.block.filter((x) => !q || `${x.title} ${x.artist}`.toLowerCase().includes(q));
+        list.replaceChildren();
+        if (!items.length) { list.appendChild(h('div', 'stm-hint', r.block.length ? '没有匹配的歌曲' : '黑名单为空')); return; }
+        for (const x of items) {
+            const row = h('div', 'stm-block-row');
+            const text = h('div', 'stm-block-text');
+            text.append(h('div', 'stm-row-title', x.title), h('div', 'stm-row-sub', x.artist));
+            const out = h('button', 'stm-text-btn stm-press', '移出');
+            out.type = 'button';
+            out.addEventListener('click', () => { rec.unblock(rec.blockId(x)); render(); });
+            row.append(text, out);
+            list.appendChild(row);
+        }
+    };
+    render();
+    box.append(input, list);
+    return box;
+}
+
+/** 黑名单变化后（例如在播放列表中点击「不喜欢」），已打开的设置页随之更新。 */
+export function refreshBlockList() {
+    for (const box of document.querySelectorAll('.stm-block-box')) box.replaceWith(blockList());
 }
 
 function fillLook(target) {
@@ -346,11 +501,59 @@ function fillLook(target) {
         item('位置', '将悬浮按钮、卡片和歌词长条移回默认位置。', textButton('复位', () => { ui.resetLayout(); strip.sync(); })),
     );
 
+    subhead(target, '唱片页');
+    card(
+        block('唱片样式', '黑胶：黑色唱片与长唱臂。彩胶：半透明盘面，颜色取自封面。磁带：转轴随播放转动，标签左上角为专辑封面。封面：方形封面，暂停时略缩小。',
+            makeSeg([{ value: 'vinyl', label: '黑胶' }, { value: 'color', label: '彩胶' }, { value: 'tape', label: '磁带' }, { value: 'cover', label: '封面' }], s.disc, (v) => { s.disc = v; save(); ui.applyDiscStyle(); })),
+        block('配色', '跟随美化：使用酒馆当前主题的颜色。封面取色：强调色和面板顶部的底色取自当前歌曲封面。封面不允许读取颜色时使用主题颜色。',
+            makeSeg([{ value: 'theme', label: '跟随美化' }, { value: 'cover', label: '封面取色' }], s.palette, (v) => { s.palette = v; save(); ui.applyDiscStyle(); })),
+    );
+
+    subhead(target, '自定义 CSS');
+    const css = h('textarea', 'stm-input stm-textarea stm-code');
+    css.rows = 6;
+    css.placeholder = '#stm-panel { --stm-radius: 12px; }';
+    css.value = s.customCss;
+    css.addEventListener('input', () => { s.customCss = css.value; save(); ui.applyCustomCss(); });
+    card(block('自定义 CSS', '输入后立即生效，可覆盖本扩展的全部样式。面板为 #stm-panel，悬浮按钮为 #stm-fab，歌词长条为 .stm-strip；颜色、圆角、动效时长等为 --stm- 开头的 CSS 变量。', css));
+
     subhead(target, '歌词长条');
     card(
         block('显示行数', '两行时第二行显示下一句。',
             makeSeg([{ value: 1, label: '一行' }, { value: 2, label: '两行' }], s.strip.lines, (v) => { s.strip.lines = v; save(); strip.applyStyle(); })),
         block('透明度', '', range(Math.round(s.strip.opacity * 100), 20, 100, 5, (v) => v + '%', (v) => { s.strip.opacity = v / 100; save(); strip.applyStyle(); })),
+    );
+
+    subhead(target, '我的');
+    const m = s.my;
+    const pick = textButton('选择图片', () => file.click());
+    const file = h('input');
+    file.type = 'file';
+    file.accept = 'image/*';
+    file.style.display = 'none';
+    const imgNote = h('div', 'stm-set-desc', m.image ? '已选择图片。' : '尚未选择图片。');
+    file.addEventListener('change', async () => {
+        const f = file.files && file.files[0];
+        if (!f) return;
+        try {
+            m.image = await shrinkImage(f, 720, 0.82);
+            m.bg = 'image';
+            bgSeg.setValue('image');
+            showPick();
+            save();
+            imgNote.textContent = '已选择图片。';
+        } catch (e) { notify('无法读取该图片', 'warning'); }
+        file.value = '';
+    });
+    // 「选择图片」只在选中「自选图片」时显示
+    const showPick = () => { pick.style.display = imgNote.style.display = m.bg === 'image' ? '' : 'none'; };
+    const bgSeg = makeSeg([{ value: 'cover', label: '当前封面' }, { value: 'chat', label: '聊天背景' }, { value: 'image', label: '自选图片' }, { value: 'none', label: '无' }], m.bg, (v) => { m.bg = v; save(); showPick(); });
+    showPick();
+    const bioInput = textInput(m.bio, '例：{{user}} 与 {{char}} 的歌单', (v) => { m.bio = v; save(); });
+    bioInput.maxLength = 60;
+    card(
+        block('顶部背景', '当前封面：虚化显示正在播放的歌曲封面。聊天背景：使用酒馆当前的聊天背景。自选图片：压缩到 720 像素宽后保存在酒馆设置中。', bgSeg, pick, imgNote, file),
+        block('简介', '显示在名字下方，可留空。支持 {{user}}、{{char}} 等酒馆宏。', bioInput),
     );
 
     subhead(target, '悬浮按钮');
@@ -416,6 +619,11 @@ function fillDebug(target) {
             try { await navigator.clipboard.writeText(player.getTrace()); notify('已复制播放记录'); } catch (e) { notify('复制失败，浏览器不允许访问剪贴板', 'warning'); }
         }),
     );
+    const s = settings();
+    cardIn(target)(block('播放方式（测试）',
+        '标准：使用浏览器的播放器，边下载边播放。音频线程：整首下载并解码后用 Web Audio 播放；单曲循环和播完接下一首都在音频线程上完成，页面脚本在后台被暂停时仍可继续（用于 Via 等浏览器）。'
+        + '音频线程方式下，每首歌需下载完成后才开始播放；解码后的数据每首约占 80–100 MB 内存，同时保留当前和下一首。切换时停止当前播放。',
+        makeSeg([{ value: 'element', label: '标准' }, { value: 'buffer', label: '音频线程' }], s.engine, (v) => { s.engine = v; save(); player.setEngine(v); })));
     cardIn(target)(block('播放记录', '最近的播放事件，新的在上。仅保存在内存中，刷新页面后清空。页面在后台被浏览器暂停时，事件在回到前台后才记录，时间为记录时的时间。', actions, log));
 }
 
