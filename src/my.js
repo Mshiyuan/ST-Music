@@ -146,7 +146,7 @@ function openImport(api) {
         const form = h('div', 'stm-import');
         const input = h('textarea', 'stm-input stm-textarea');
         input.rows = 5;
-        input.placeholder = '网易云歌单的链接或编号；或每行一首：歌名 - 歌手';
+        input.placeholder = '网易云歌单的分享文字、链接或编号；或每行一首：歌名 - 歌手';
         const name = h('input', 'stm-input');
         name.type = 'text';
         name.placeholder = '歌单名称（可留空）';
@@ -157,16 +157,26 @@ function openImport(api) {
             const text = input.value.trim();
             if (!text) { status.textContent = '请先粘贴内容。'; return; }
             run.disabled = true;
+            const PRIVATE = '读取失败。该歌单可能在网易云中设为隐私，公共接口无法读取隐私歌单；可在网易云中将其改为公开后重试，或改用文本清单导入。';
             try {
                 const parsed = library.parsePlaylistInput(text);
+                let id = parsed && parsed.id;
                 if (parsed && parsed.short) {
-                    status.textContent = '短链接无法直接读取。请在浏览器中打开该链接，复制地址栏中的完整地址后粘贴。';
-                } else if (parsed && parsed.id) {
+                    status.textContent = '正在解析短链接';
+                    try { id = await library.resolveShort(parsed.short); } catch (e) { id = undefined; }
+                    if (id === undefined) status.textContent = '短链接解析失败。请在浏览器中打开该链接，复制地址栏中的完整地址后粘贴。';
+                    else if (!id) status.textContent = PRIVATE;
+                }
+                if (id) {
                     status.textContent = '正在读取歌单';
-                    const out = await library.importPlaylist(parsed.id, name.value);
-                    api.closeSheet();
-                    notify(`已导入 ${out.count} 首：${out.list.name}`);
-                } else {
+                    try {
+                        const out = await library.importPlaylist(id, name.value);
+                        api.closeSheet();
+                        notify(`已导入 ${out.count} 首：${out.list.name}`);
+                    } catch (e) {
+                        status.textContent = PRIVATE;
+                    }
+                } else if (!parsed) {
                     const out = await library.importText(text, name.value, (done, total) => { status.textContent = `正在匹配 ${done} / ${total}`; });
                     if (!out.list) { status.textContent = '没有匹配到任何歌曲。'; }
                     else if (out.missed.length) { status.textContent = `已导入 ${out.count} 首。未匹配：${out.missed.join('、')}`; }

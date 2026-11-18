@@ -149,6 +149,23 @@ export function parsePlaylistInput(text) {
     return null;
 }
 
+/**
+ * 通过酒馆服务器自带的网页访问功能打开 163cn.tv 短链接，从跳转后的页面里取歌单编号。
+ * 请求只发往网易云自己的域名。隐私歌单的页面不含编号，返回 null。
+ */
+export async function resolveShort(url) {
+    const c = globalThis.SillyTavern.getContext();
+    const res = await fetch('/api/search/visit', {
+        method: 'POST',
+        headers: c.getRequestHeaders(),
+        body: JSON.stringify({ url, html: true }),
+    });
+    if (!res.ok) throw new Error('visit');
+    const html = await res.text();
+    const m = /"info":\{"id":(\d+)/.exec(html) || /playlist\?id=(\d+)/.exec(html);
+    return m ? m[1] : null;
+}
+
 /** 读取网易云歌单并存为本地歌单，返回 { list, count }。 */
 export async function importPlaylist(id, name) {
     const tracks = await getPlaylist(id);

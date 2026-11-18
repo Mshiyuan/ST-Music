@@ -231,6 +231,7 @@ function buildPanel() {
     });
 
     const body = h('div', 'stm-body');
+    els.body = body;
     const page = (name) => { const sec = h('section', 'stm-view stm-page'); sec.dataset.view = name; return sec; };
     els.myPage = page('my');
     els.pickPage = page('pick');
@@ -270,7 +271,8 @@ function buildFoot() {
     els.tabs = {};
     for (const [name, icon, title] of TABS) {
         const b = iconButton(icon, title, 'stm-tab');
-        b.addEventListener('click', () => go(name));
+        // 已在当前页时不做任何事，避免页面重新生成而闪动
+        b.addEventListener('click', () => { if (view !== name) go(name); });
         els.tabs[name] = b;
         tabs.appendChild(b);
     }
@@ -278,37 +280,123 @@ function buildFoot() {
     return foot;
 }
 
-/** 左右滑动切换底栏的各页。进度条、输入框、歌词、弹出层上的滑动不算。 */
+/** 可以左右滑动切换的页面：收起式下唱片页不在其中（它从底部升起）。 */
+const slideOrder = () => (settings().nowForm === 'sheet' ? TAB_ORDER.slice(1) : TAB_ORDER);
+const SLIDE_EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';   // 不越过终点，避免两页之间露出空隙
+const SLIDE_DUR = 460;
+const canSlide = () => document.documentElement.dataset.stmMotion !== 'fade' && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/** 为某一页准备内容（拖动时提前显示相邻页用）。 */
+function renderView(v) {
+    if (v === 'my') my.renderMy(els.myPage, api);
+    if (v === 'pick') renderPick();
+    if (v === 'settings') buildSettings(els.settingsPage, 'pages');
+}
+
+let slideAnims = [];
+function stopSlide() {
+    const els2 = [...panel.querySelectorAll('.stm-view.stm-leaving, .stm-view.stm-sliding')];
+    // 移出的页面直接隐藏，不再播放 CSS 的退出过渡，否则它会在原位闪一下
+    for (const el of els2) if (el.classList.contains('stm-leaving')) el.classList.add('stm-noanim');
+    for (const a of slideAnims) a.cancel();
+    slideAnims = [];
+    for (const el of els2) el.classList.remove('stm-leaving', 'stm-sliding');
+    if (els2.length) {
+        void els.body.offsetWidth;
+        for (const el of els2) el.classList.remove('stm-noanim');
+    }
+}
+
+/** 两页一起横向移动：旧页移出，新页移入。start 是拖动已经走过的距离。 */
+function slide(fromEl, toEl, dir, start = 0) {
+    stopSlide();
+    const w = els.body.clientWidth;
+    fromEl.classList.add('stm-leaving', 'stm-sliding');
+    toEl.classList.add('stm-sliding');
+    fromEl.style.transform = '';
+    toEl.style.transform = '';
+    const opts = { duration: SLIDE_DUR, easing: SLIDE_EASE, fill: 'forwards' };
+    const a = fromEl.animate([{ transform: `translateX(${start}px)` }, { transform: `translateX(${-dir * w}px)` }], opts);
+    const b = toEl.animate([{ transform: `translateX(${dir * w + start}px)` }, { transform: 'translateX(0)' }], opts);
+    slideAnims = [a, b];
+    b.onfinish = () => { if (slideAnims[1] === b) stopSlide(); };
+}
+
+/** 左右滑动切换页面：页面跟随手指移动，松手后按距离和速度决定切换或回弹。 */
 function bindSwipe(body) {
-    let sx = 0, sy = 0, armed = false;
+    let sx = 0, sy = 0, st = 0, armed = false, dragging = false, cur = null, peek = null, peekDir = 0, lastX = 0, lastT = 0, vx = 0;
+    const order = () => slideOrder();
+    const neighbor = (dir) => { const o = order(); const i = o.indexOf(view === 'detail' ? 'my' : view); return i < 0 ? null : o[i + dir] || null; };
+    const setPeek = (dir) => {
+        if (peekDir === dir) return;
+        if (peek) { peek.classList.remove('stm-peek'); peek.style.transform = ''; }
+        peek = null; peekDir = dir;
+        const v = neighbor(dir);
+        if (!v) return;
+        renderView(v);
+        peek = viewEl(v);
+        peek.classList.add('stm-peek');
+    };
+    const reset = () => {
+        if (cur) { cur.classList.remove('stm-dragging'); cur.style.transform = ''; }
+        if (peek) { peek.classList.remove('stm-peek'); peek.style.transform = ''; }
+        cur = null; peek = null; peekDir = 0; dragging = false;
+    };
     body.addEventListener('pointerdown', (e) => {
-        armed = !e.target.closest('.stm-bar, input, textarea, select, .stm-seg, .stm-sheet, .stm-lyrics, .stm-scrub, .stm-cap');
-        sx = e.clientX; sy = e.clientY;
+        armed = canSlide() && order().includes(view === 'detail' ? 'my' : view)
+            && !e.target.closest('.stm-bar, input, textarea, select, .stm-seg, .stm-sheet, .stm-lyrics, .stm-scrub, .stm-cap, .stm-range, .stm-set-in');
+        sx = lastX = e.clientX; sy = e.clientY; st = lastT = e.timeStamp; vx = 0;
     });
-    body.addEventListener('pointercancel', () => { armed = false; });
-    body.addEventListener('pointerup', (e) => {
+    body.addEventListener('pointermove', (e) => {
+        if (!armed) return;
+        const dx = e.clientX - sx, dy = e.clientY - sy;
+        if (!dragging) {
+            if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) { armed = false; return; }
+            if (Math.abs(dx) < 10) return;
+            dragging = true;
+            stopSlide();
+            cur = viewEl(view);
+            cur.classList.add('stm-dragging');
+        }
+        vx = (e.clientX - lastX) / Math.max(1, e.timeStamp - lastT);
+        lastX = e.clientX; lastT = e.timeStamp;
+        const dir = dx < 0 ? 1 : -1;
+        setPeek(dir);
+        const w = els.body.clientWidth;
+        const x = peek ? dx : dx * 0.3;   // 没有相邻页时只移动一小段，表示已到尽头
+        cur.style.transform = `translateX(${x}px)`;
+        if (peek) peek.style.transform = `translateX(${dir * w + dx}px)`;
+    });
+    const end = (e, cancelled) => {
         if (!armed) return;
         armed = false;
-        const dx = e.clientX - sx, dy = e.clientY - sy;
-        if (Math.abs(dx) < SWIPE_MIN || Math.abs(dx) < Math.abs(dy) * 1.5) return;
-        const cur = view === 'detail' ? 'my' : view;
-        const j = TAB_ORDER.indexOf(cur) + (dx < 0 ? 1 : -1);
-        if (TAB_ORDER.indexOf(cur) < 0 || j < 0 || j >= TAB_ORDER.length) return;
-        // 滑动结束时不再触发点击（例如点唱片切换歌词）
+        if (!dragging) return;
+        const dx = e.clientX - sx;
+        const w = els.body.clientWidth;
+        const dir = dx < 0 ? 1 : -1;
+        const target = peek && !cancelled && (Math.abs(dx) > w * 0.22 || (Math.abs(vx) > 0.45 && Math.sign(vx) === -dir)) ? neighbor(dir) : null;
+        // 拖动结束时不再触发点击（例如点唱片切换歌词）
         const stop = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
         body.addEventListener('click', stop, true);
         setTimeout(() => body.removeEventListener('click', stop, true), 0);
-        go(TAB_ORDER[j]);
-    });
-}
-
-/** 设置页面进出的方向：底栏各页之间横向移动，其余保持默认。 */
-function prepareView(el, from) {
-    if (!el) return;
-    const shown = el.classList.contains('stm-show');
-    if (!shown) el.classList.add('stm-noanim');
-    if (from) el.style.setProperty('--stm-from', from); else el.style.removeProperty('--stm-from');
-    if (!shown) { void el.offsetWidth; el.classList.remove('stm-noanim'); }
+        const from = cur, pk = peek;
+        const x = peek ? dx : dx * 0.3;
+        reset();
+        if (target) { go(target, undefined, { start: dx }); return; }
+        // 回弹
+        const opts = { duration: SLIDE_DUR, easing: SLIDE_EASE, fill: 'forwards' };
+        stopSlide();
+        from.classList.add('stm-sliding');
+        const anims = [from.animate([{ transform: `translateX(${x}px)` }, { transform: 'translateX(0)' }], opts)];
+        if (pk) {
+            pk.classList.add('stm-leaving', 'stm-sliding');
+            anims.push(pk.animate([{ transform: `translateX(${dir * w + dx}px)` }, { transform: `translateX(${dir * w}px)` }], opts));
+        }
+        slideAnims = anims;
+        anims[0].onfinish = () => { if (slideAnims[0] === anims[0]) stopSlide(); };
+    };
+    body.addEventListener('pointerup', (e) => end(e, false));
+    body.addEventListener('pointercancel', (e) => end(e, true));
 }
 
 export function togglePanel(force) {
@@ -324,24 +412,20 @@ export function togglePanel(force) {
 
 const viewEl = (v) => panel.querySelector(`.stm-view[data-view="${v}"]`);
 
-/** 切换页面。detail 页需要 arg 指明显示什么。 */
-export function go(v, arg) {
+/** 切换页面。detail 页需要 arg 指明显示什么。opts.start：拖动切换时已经移动的距离。 */
+export function go(v, arg, opts = {}) {
     const from = view;
     if (v === 'search' && from !== 'search') prevView = from === 'detail' ? 'my' : from;
     if (v !== 'now' && TAB_ORDER.includes(v)) lastTab = v;
     view = v;
     if (v === 'detail') detailArg = arg;
-    if (v === 'my') my.renderMy(els.myPage, api);
-    if (v === 'pick') renderPick();
     if (v === 'detail') my.renderDetail(els.detailPage, detailArg, api);
-    if (v === 'settings') buildSettings(els.settingsPage);
+    else if (!(opts.start !== undefined && from !== v)) renderView(v);   // 拖动时相邻页已经生成过
     if (from !== v) {
-        const a = TAB_ORDER.indexOf(from), b = TAB_ORDER.indexOf(v);
-        const sheetEdge = settings().nowForm === 'sheet' && (from === 'now' || v === 'now');
-        const horiz = a >= 0 && b >= 0 && !sheetEdge && document.documentElement.dataset.stmMotion !== 'fade';
-        const dir = b > a ? 1 : -1;
-        prepareView(viewEl(from), horiz ? `translateX(${-dir * 36}px)` : null);
-        prepareView(viewEl(v), horiz ? `translateX(${dir * 36}px)` : null);
+        const o = slideOrder();
+        const a = o.indexOf(from), b = o.indexOf(v);
+        if (a >= 0 && b >= 0 && canSlide() && panel.classList.contains('stm-open')) slide(viewEl(from), viewEl(v), b > a ? 1 : -1, opts.start || 0);
+        else stopSlide();
     }
     for (const el of panel.querySelectorAll('.stm-view')) el.classList.toggle('stm-show', el.dataset.view === v);
     panel.dataset.view = v;

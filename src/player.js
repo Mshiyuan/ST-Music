@@ -28,10 +28,11 @@ const traces = [];
 export function trace(text) {
     const d = new Date();
     const p = (n) => String(n).padStart(2, '0');
-    traces.push(`${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} ${document.hidden ? '后台' : '前台'} ${text}`);
+    traces.push({ time: `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`, hidden: document.hidden, text });
     if (traces.length > TRACE_MAX) traces.shift();
 }
-export const getTrace = () => traces.join('\n');
+export const getTraceItems = () => traces;
+export const getTrace = () => traces.map((t) => `${t.time} ${t.hidden ? '后台' : '前台'} ${t.text}`).join('\n');
 
 export const state = {
     playing: false,
@@ -149,6 +150,7 @@ export async function playIndex(i, autoplay = true) {
     save();
     const track = q[s.index];
     if (pendingNext === track.key) pendingNext = null;
+    syncLoop();
     const token = ++loadToken;
     trace(`切换到：${track.title}`);
     audio.pause();
@@ -285,6 +287,7 @@ export function setRecommended(tracks, immediate) {
         playIndex(at);
     } else {
         pendingNext = fresh[0].key;
+        syncLoop();
     }
     return fresh.length;
 }
@@ -316,10 +319,16 @@ export function removeAt(i) {
     emit('lyric');
 }
 
+/** 单曲循环交给播放器自带的循环：一曲结束时不需要脚本参与，页面在后台时也能循环。 */
+function syncLoop() {
+    audio.loop = settings().mode === 'single' && !pendingNext;
+}
+
 export function cycleMode() {
     const order = ['loop', 'single', 'shuffle'];
     const s = settings();
     s.mode = order[(order.indexOf(s.mode) + 1) % order.length];
+    syncLoop();
     save();
     emit('state');
     return s.mode;
@@ -352,6 +361,7 @@ audio.addEventListener('ended', () => {
 
 export function init() {
     audio.volume = settings().volume;
+    syncLoop();
     const t = current();
     if (t) { emit('track'); loadLyric(t); }
 }

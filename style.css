@@ -1611,7 +1611,6 @@
     justify-content: space-around;
     height: 52px;
     padding: 0 22px;
-    border-top: 1px solid var(--stm-softer);
     transition:
         transform var(--stm-in-dur) var(--stm-spring),
         opacity var(--stm-in-dur) var(--stm-spring),
@@ -1647,7 +1646,260 @@
     padding: 12px 4px;
 }
 
-/* ---------- 设置：可折叠的板块 ---------- */
+/* ---------- 页面横向滑动（动画由脚本用 Web Animations 驱动，只改 transform） ---------- */
+.stm-view.stm-sliding,
+.stm-view.stm-dragging,
+.stm-view.stm-peek {
+    opacity: 1 !important;
+    visibility: inherit !important;
+    transition: none !important;
+}
+
+.stm-view.stm-leaving,
+.stm-view.stm-peek {
+    pointer-events: none !important;
+}
+
+.stm-view.stm-page {
+    overflow-x: hidden;
+}
+
+/* ---------- 设置（面板内）：分类首页与分类页 ---------- */
+.stm-view.stm-set-pages {
+    overflow: hidden;
+    padding: 0;
+}
+
+.stm-set-pane {
+    position: absolute;
+    inset: 0;
+    box-sizing: border-box;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 0 16px 16px;
+    touch-action: pan-y;
+    transition:
+        transform 460ms cubic-bezier(0.32, 0.72, 0, 1),
+        opacity 460ms cubic-bezier(0.32, 0.72, 0, 1),
+        visibility 0s linear 460ms;
+}
+
+.stm-set-root {
+    visibility: inherit;
+    transition:
+        transform 460ms cubic-bezier(0.32, 0.72, 0, 1),
+        opacity 460ms cubic-bezier(0.32, 0.72, 0, 1),
+        visibility 0s;
+}
+
+.stm-set-sub {
+    opacity: 0;
+    transform: translateX(100%);
+    visibility: hidden;
+    pointer-events: none;
+}
+
+.stm-set-in .stm-set-root {
+    opacity: 0;
+    transform: translateX(-30%);
+    visibility: hidden;
+    pointer-events: none;
+    transition:
+        transform 460ms cubic-bezier(0.32, 0.72, 0, 1),
+        opacity 460ms cubic-bezier(0.32, 0.72, 0, 1),
+        visibility 0s linear 460ms;
+}
+
+.stm-set-in .stm-set-sub {
+    opacity: 1;
+    transform: none;
+    visibility: inherit;
+    pointer-events: inherit;
+    transition:
+        transform 460ms cubic-bezier(0.32, 0.72, 0, 1),
+        opacity 460ms cubic-bezier(0.32, 0.72, 0, 1),
+        visibility 0s;
+}
+
+:root[data-stm-motion="fade"] .stm-set-pane {
+    transform: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .stm-set-pane { transition-duration: 1ms !important; }
+}
+
+.stm-set-subbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: -8px;
+    padding-bottom: 4px;
+}
+
+.stm-set-subtitle {
+    font-weight: 700;
+}
+
+.stm-cat-list {
+    padding: 4px 6px;
+}
+
+.stm-cat-row {
+    appearance: none;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    margin: 0;
+    padding: 13px 8px;
+    border: 0;
+    border-radius: 12px;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.stm-cat-icon,
+.stm-sec-icon {
+    width: 20px;
+    text-align: center;
+    color: var(--stm-accent);
+}
+
+.stm-sec-icon {
+    margin-right: 10px;
+}
+
+.stm-cat-name {
+    flex: 1;
+    font-weight: 600;
+}
+
+/* ---------- 设置（酒馆扩展页）：向下展开的下拉区块 ---------- */
+.stm-sec-wrap {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows var(--stm-out-dur) var(--stm-out);
+}
+
+.stm-sec-open .stm-sec-wrap {
+    grid-template-rows: 1fr;
+    transition: grid-template-rows 460ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.stm-sec-inner {
+    min-height: 0;
+    overflow: hidden;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity var(--stm-out-dur) var(--stm-out), visibility 0s linear var(--stm-out-dur);
+}
+
+.stm-sec-open .stm-sec-inner {
+    opacity: 1;
+    visibility: inherit;
+    transition: opacity 420ms ease-out, visibility 0s;
+}
+
+/* ---------- 语言偏好：长按后右上角出现 × ---------- */
+.stm-chip.stm-chip-lang {
+    position: relative;
+    overflow: visible;
+}
+
+.stm-chip-x {
+    position: absolute;
+    top: -7px;
+    right: -7px;
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--stm-fg);
+    color: var(--stm-bg);
+    font-size: 10px;
+    opacity: 0;
+    transform: scale(0.3);
+    visibility: hidden;
+    pointer-events: none;
+    transition:
+        transform var(--stm-out-dur) var(--stm-out),
+        opacity var(--stm-out-dur) var(--stm-out),
+        visibility 0s linear var(--stm-out-dur);
+}
+
+.stm-editing .stm-chip-x {
+    opacity: 1;
+    transform: none;
+    visibility: inherit;
+    pointer-events: auto;
+    transition:
+        transform var(--stm-release-dur) var(--stm-spring),
+        opacity var(--stm-out-dur) ease-out,
+        visibility 0s;
+}
+
+/* ---------- 调试：播放记录 ---------- */
+.stm-log-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.stm-log {
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 6px 8px;
+    border-radius: 12px;
+    background: var(--stm-soft);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.stm-log-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 3px 0;
+}
+
+.stm-log-time {
+    flex: none;
+    color: var(--stm-dim);
+    font-variant-numeric: tabular-nums;
+}
+
+.stm-log-tag {
+    flex: none;
+    padding: 0 5px;
+    border-radius: 6px;
+    background: var(--stm-raise);
+    font-size: 11px;
+}
+
+.stm-log-tag.stm-bg {
+    background: var(--stm-accent);
+    color: var(--stm-bg);
+}
+
+.stm-log-text {
+    flex: 1;
+    min-width: 0;
+    word-break: break-all;
+}
+
+.stm-log-empty {
+    padding: 8px 0;
+    color: var(--stm-dim);
+}
+
+/* ---------- 设置：可折叠的板块（标题行） ---------- */
 .stm-sec-head {
     appearance: none;
     display: flex;
@@ -1670,26 +1922,13 @@
     transition: transform var(--stm-release-dur) var(--stm-spring);
 }
 
-.stm-sec-open:not(.stm-sec-closing) .stm-sec-arrow {
+.stm-sec-open .stm-sec-arrow {
     transform: rotate(180deg);
 }
 
-.stm-sec-body {
-    display: none;
-}
-
-.stm-sec-open .stm-sec-body {
-    display: block;
-    transform-origin: 50% 0;
-    animation: stm-in var(--stm-in-dur) var(--stm-spring) both;
-}
-
-.stm-sec-closing .stm-sec-body {
-    animation: stm-fold var(--stm-out-dur) var(--stm-out) both;
-}
-
-@keyframes stm-fold {
-    to { opacity: 0; transform: translateY(-8px) scale(0.98); }
+.stm-sec-name {
+    display: flex;
+    align-items: center;
 }
 
 /* ---------- 输入框：文字与示例文字的字号 ---------- */
